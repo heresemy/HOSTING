@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLACK ADMIN HOSTING PANEL</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0a0a0a;
+            color: #ffffff;
+            overflow-x: hidden;
+        }
+        nav {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            padding: 20px 50px;
+            background: rgba(10, 10, 10, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            z-index: 1000;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logo {
+            font-size: 28px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #00ffcc, #00d4ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -1px;
+        }
+        .nav-links {
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+        .nav-links a {
+            color: #a0a0a0;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s;
+        }
+        .nav-links a:hover { color: #00ffcc; }
+        .login-btn {
+            background: linear-gradient(135deg, #00ffcc, #00d4ff);
+            color: #000 !important;
+            padding: 10px 25px;
+            border-radius: 25px;
+            font-weight: 600;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .login-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(0, 255, 204, 0.3);
+        }
+        .hero {
+            margin-top: 80px;
+            padding: 100px 50px;
+            text-align: center;
+            background: radial-gradient(ellipse at top, rgba(0, 255, 204, 0.1), transparent 50%),
+                        radial-gradient(ellipse at bottom, rgba(0, 212, 255, 0.1), transparent 50%);
+        }
+        .hero h1 {
+            font-size: 72px;
+            font-weight: 800;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, #ffffff, #00ffcc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            line-height: 1.1;
+        }
+        .hero p {
+            font-size: 20px;
+            color: #a0a0a0;
+            max-width: 600px;
+            margin: 0 auto 40px;
+            line-height: 1.6;
+        }
+        .cta-buttons {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin-bottom: 60px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #00ffcc, #00d4ff);
+            color: #000;
+            padding: 15px 40px;
+            border-radius: 30px;
+            text-decoration: none;
+            font-weight: 700;
+            font-size: 16px;
+            transition: all 0.3s;
+            box-shadow: 0 10px 30px rgba(0, 255, 204, 0.3);
+        }
+        .btn-primary:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 20px 40px rgba(0, 255, 204, 0.4);
+        }
+        .btn-secondary {
+            background: transparent;
+            color: #fff;
+            padding: 15px 40px;
+            border-radius: 30px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s;
+        }
+        .btn-secondary:hover {
+            border-color: #00ffcc;
+            color: #00ffcc;
+        }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 60px;
+            flex-wrap: wrap;
+            margin-top: 40px;
+        }
+        .stat-item { text-align: center; }
+        .stat-number {
+            font-size: 48px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #00ffcc, #00d4ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 5px;
+        }
+        .pricing-section {
+            padding: 100px 50px;
+            background: radial-gradient(ellipse at center, rgba(0, 255, 204, 0.05), transparent 70%);
+        }
+        .section-title {
+            text-align: center;
+            font-size: 42px;
+            font-weight: 700;
+            margin-bottom: 60px;
+            color: #fff;
+        }
+        .pricing-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .pricing-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 40px;
+            position: relative;
+            transition: all 0.3s;
+        }
+        .pricing-card:hover { transform: scale(1.02); }
+        .pricing-card.popular {
+            border-color: #00ffcc;
+            background: rgba(0, 255, 204, 0.05);
+        }
+        .popular-badge {
+            position: absolute;
+            top: -12px;
+            right: 20px;
+            background: linear-gradient(135deg, #00ffcc, #00d4ff);
+            color: #000;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .pricing-card h3 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+        .price {
+            font-size: 48px;
+            font-weight: 800;
+            margin-bottom: 30px;
+        }
+        .price span {
+            font-size: 16px;
+            color: #666;
+            font-weight: 400;
+        }
+        .features-list {
+            list-style: none;
+            margin-bottom: 30px;
+        }
+        .features-list li {
+            padding: 10px 0;
+            color: #aaa;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .features-list li:before {
+            content: "✓";
+            color: #00ffcc;
+            margin-right: 10px;
+            font-weight: bold;
+        }
+        footer {
+            padding: 50px;
+            text-align: center;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <div class="logo">⚡ BLACK ADMIN</div>
+        <div class="nav-links">
+            <a href="#pricing">Pricing</a>
+            <a href="/login" class="login-btn">Login</a>
+        </div>
+    </nav>
+
+    <section class="hero">
+        <h1>Host Your Bots<br>With Power</h1>
+        <p>Deploy your Discord bots and applications with ultra-low latency, DDoS protection, and 24/7 uptime.</p>
+        <div class="cta-buttons">
+            <a href="/login" class="btn-primary">Get Started Free</a>
+            <a href="#pricing" class="btn-secondary">View Plans</a>
+        </div>
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-number">100K+</div>
+                <div class="stat-label">Active Users</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">99.9%</div>
+                <div class="stat-label">Uptime</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">24/7</div>
+                <div class="stat-label">Support</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="pricing-section" id="pricing">
+        <h2 class="section-title">Choose Your Plan</h2>
+        <div class="pricing-grid">
+            {% for plan_id, plan in plans.items() if plan.active %}
+            <div class="pricing-card {% if plan.popular %}popular{% endif %}">
+                {% if plan.popular %}<div class="popular-badge">POPULAR</div>{% endif %}
+                <h3>{{ plan.name }}</h3>
+                <div class="price">${{ plan.price }}<span>/month</span></div>
+                <ul class="features-list">
+                    <li>{{ plan.ram }} RAM</li>
+                    <li>{{ plan.storage }} Storage</li>
+                    <li>{{ plan.bots }} Bot Slots</li>
+                    {% for feature in plan.features %}
+                    <li>{{ feature }}</li>
+                    {% endfor %}
+                </ul>
+                <a href="/login" class="btn-primary" style="width: 100%; display: inline-block; text-align: center;">
+                    {% if plan.price == 0 %}Get Started{% else %}Upgrade{% endif %}
+                </a>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <footer>
+        <p>&copy; 2026 BLACK ADMIN HOSTING PANEL. All rights reserved.</p>
+    </footer>
+</body>
+</html>

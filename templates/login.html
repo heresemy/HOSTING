@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BLACK ADMIN HOSTING - Login</title>
+    <style>
+        body {
+            background: #050505;
+            color: white;
+            text-align: center;
+            padding-top: 100px;
+            font-family: sans-serif;
+            overflow: hidden;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 45px rgba(0,0,0,0.5), inset 0 0 15px rgba(0,255,204,0.2);
+            border-radius: 20px;
+            padding: 50px;
+            display: inline-block;
+            transform: perspective(1000px) rotateX(5deg);
+            animation: glow 3s infinite alternate;
+        }
+        @keyframes glow { 
+            from { box-shadow: 0 0 10px #00ffcc; } 
+            to { box-shadow: 0 0 30px #00ffcc; } 
+        }
+        input {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            outline: none;
+            padding: 15px;
+            margin: 10px;
+            color: white;
+            border-radius: 10px;
+            width: 280px;
+            box-shadow: inset 2px 2px 5px rgba(0,0,0,0.5);
+        }
+        button {
+            background: #00ffcc;
+            color: black;
+            font-weight: bold;
+            padding: 15px 40px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: 0.3s;
+            box-shadow: 0 5px 15px rgba(0,255,204,0.4);
+        }
+        button:hover { 
+            transform: scale(1.05); 
+            box-shadow: 0 0 25px #00ffcc; 
+        }
+        .error {
+            color: #ff4444;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 style="color:#00ffcc; text-shadow: 0 0 10px #00ffcc;">BLACK ADMIN HOSTING PANEL</h2>
+        <form method="post">
+            <input type="text" name="username" placeholder="Username" required><br>
+            <input type="text" name="access_key" placeholder="Password" required><br><br>
+            <button type="submit">LOGIN SYSTEM</button>
+        </form>
+        <p style="margin-top: 20px; color: #666; font-size: 12px;">
+            New user? Just enter username/password to auto-register
+        </p>
+    </div>
+</body>
+</html>

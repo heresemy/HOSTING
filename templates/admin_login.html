@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Login - BLACK ADMIN</title>
+    <style>
+        body {
+            background: #050505;
+            color: white;
+            text-align: center;
+            padding-top: 100px;
+            font-family: sans-serif;
+        }
+        .glow-box {
+            background: rgba(0, 0, 0, 0.6);
+            border: 2px solid #fff;
+            padding: 60px;
+            border-radius: 30px;
+            display: inline-block;
+            animation: adminGlow 2s infinite alternate;
+            transform: perspective(1000px) rotateY(10deg);
+        }
+        @keyframes adminGlow { 
+            from { box-shadow: 0 0 20px #ff00de; } 
+            to { box-shadow: 0 0 50px #00d4ff; } 
+        }
+        input { 
+            padding: 12px; 
+            margin: 10px; 
+            width: 250px; 
+            border-radius: 8px; 
+            border: 1px solid #fff; 
+            background: transparent; 
+            color: #fff; 
+        }
+        button { 
+            padding: 15px 50px; 
+            background: linear-gradient(45deg, #ff00de, #00d4ff); 
+            border: none; 
+            color: white; 
+            border-radius: 10px; 
+            cursor: pointer; 
+            font-weight: bold; 
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="glow-box">
+        <h1 style="text-shadow: 0 0 15px #00d4ff;">🛡️ MASTER CONTROL</h1>
+        <form method="post">
+            <input type="text" name="u" placeholder="Username" required><br>
+            <input type="password" name="p" placeholder="Password" required><br>
+            <button type="submit">UNLOCK ADMIN PANEL</button>
+        </form>
+    </div>
+</body>
+</html>

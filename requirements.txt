@@ -1,9 +1,0 @@
-Flask
-pyTelegramBotAPI
-requests
-idna
-certifi
-charset-normalizer
-urllib3
-emoji
-

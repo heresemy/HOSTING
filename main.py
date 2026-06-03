@@ -133,16 +133,6 @@ def start_app(user, app_name):
             found_main = os.path.join(root, startup_file)
             target_dir = root
             break
-    
-    if not found_main:
-        for root, dirs, files in os.walk(extract_dir):
-            for f in files:
-                if f in ["main.py", "app.py", "bot.py", "index.py", "run.py", "start.py"]:
-                    found_main = os.path.join(root, f)
-                    target_dir = root
-                    break
-            if found_main:
-                break
 
     if not found_main:
         return False, f"No startup file found"
@@ -252,7 +242,6 @@ def get_directory_structure(user, app_name, path=""):
 
 # ---------- Routes ----------
 
-# Main Index route maps directly to Login
 @app.route("/")
 def index():
     return redirect(url_for("login"))
@@ -272,7 +261,7 @@ def login():
             session['is_admin'] = False
             return redirect(url_for("dashboard"))
         else:
-            error = "❌ Galat ID/Password! Kripya sahi details bharein ya Admin se sampark karein."
+            error = "❌ Galat ID/Password!"
     
     return render_template_string(LOGIN_TEMPLATE, error=error)
 
@@ -339,7 +328,7 @@ def upload_app():
     current_apps = len([d for d in os.listdir(user_dir) if os.path.isdir(os.path.join(user_dir, d))]) if os.path.exists(user_dir) else 0
     
     if current_apps >= limits["max_bots"]:
-        flash(f"❌ Bot limit exceed! Max {limits['max_bots']} bot(s) allowed. Admin se contact karein.", "error")
+        flash(f"❌ Bot limit exceed! Max {limits['max_bots']} bot(s) allowed.", "error")
         return redirect(url_for("dashboard"))
     
     file = request.files.get("file")
@@ -716,7 +705,6 @@ def admin_dashboard():
     if request.method == "POST":
         action = request.form.get("action")
         
-        # Admin creates or updates a user and their limits
         if action == "save_user":
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "").strip()
@@ -733,7 +721,7 @@ def admin_dashboard():
                 }
                 save_users(users)
                 save_limits(limits)
-                flash(f"✅ User '{username}' configuration updated successfully!", "success")
+                flash(f"✅ User '{username}' configuration updated!", "success")
         
         elif action == "delete_user":
             target_user = request.form.get("username")
@@ -743,7 +731,7 @@ def admin_dashboard():
                     del limits[target_user]
                 save_users(users)
                 save_limits(limits)
-                flash(f"🗑️ User '{target_user}' removed from system.", "success")
+                flash(f"🗑️ User '{target_user}' removed.", "success")
 
     total_users = len(users)
     bots_list = []
@@ -820,47 +808,63 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-# ---------- CSS & UI SYSTEM ----------
+# ---------- CSS UI SYSTEM (100% Mobile & Desktop Responsive) ----------
 COMMON_STYLE = '''
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
     :root { 
-        --bg: #090d16; --card: #111827; --primary: #00f0ff; 
+        --bg: #070b12; --card: #0f172a; --primary: #00f0ff; 
         --primary-hover: #00c8ff; --text: #f3f4f6; 
-        --success: #10b981; --danger: #ef4444; --border: #1f2937;
+        --success: #10b981; --danger: #ef4444; --border: #1e293b;
     }
+    * { box-sizing: border-box; }
     body { 
         font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); 
-        color: var(--text); margin: 0; padding: 20px; display: flex; 
-        flex-direction: column; align-items: center; min-height: 100vh; box-sizing: border-box; 
+        color: var(--text); margin: 0; padding: 10px; display: flex; 
+        flex-direction: column; align-items: center; min-height: 100vh;
     }
     .card { 
         background: var(--card); border: 1px solid var(--border); border-radius: 12px; 
-        padding: 25px; width: 100%; max-width: 500px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); 
-        box-sizing: border-box; text-align: center; margin-bottom: 20px; 
+        padding: 16px; width: 100%; max-width: 850px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); 
+        margin-bottom: 15px;
+    }
+    .responsive-grid {
+        display: grid; grid-template-columns: 1fr; gap: 15px; width: 100%;
+    }
+    @media (min-width: 768px) {
+        body { padding: 25px; }
+        .card { padding: 25px; }
+        .responsive-grid { grid-template-columns: 1fr 2fr; }
     }
     input, select, textarea { 
-        width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; 
-        border: 1px solid var(--border); background: #1f2937; color: white; box-sizing: border-box; font-size: 15px; 
+        width: 100%; padding: 12px; margin: 8px 0; border-radius: 6px; 
+        border: 1px solid var(--border); background: #1e293b; color: white; font-size: 15px; outline: none;
     }
     button, .btn { 
-        width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; border: none;
+        width: 100%; padding: 12px; margin: 8px 0; border-radius: 6px; border: none;
         background: var(--primary); color: #000; font-weight: bold; cursor: pointer;
-        font-size: 15px; transition: 0.2s; display: inline-block; text-decoration: none; box-sizing: border-box;
+        font-size: 15px; transition: 0.2s; display: inline-block; text-decoration: none; text-align: center;
     }
-    button:hover, .btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
+    button:hover, .btn:hover { background: var(--primary-hover); }
     .btn-danger { background: var(--danger); color: white; }
     .btn-success { background: var(--success); color: white; }
-    .btn-secondary { background: #374151; color: white; }
-    .flash { padding: 12px; background: #1f2937; border-left: 4px solid var(--primary); margin: 10px 0; text-align: left; border-radius: 4px; font-size: 14px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 15px; background: var(--card); border-radius: 8px; overflow: hidden; }
+    .btn-secondary { background: #334155; color: white; }
+    .flash { padding: 12px; background: #1e293b; border-left: 4px solid var(--primary); margin: 10px 0; border-radius: 4px; font-size: 14px; word-break: break-all; }
+    
+    .table-container { width: 100%; overflow-x: auto; margin-top: 15px; border-radius: 8px; border: 1px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; background: #0f172a; min-width: 450px; }
     th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
-    th { background: #1f2937; color: var(--primary); }
-    a { color: var(--primary); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+    th { background: #1e293b; color: var(--primary); }
+    
+    .bot-item { background: #070b12; border: 1px solid var(--border); padding: 12px; border-radius: 8px; margin-bottom: 10px; }
+    .bot-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .bot-controls .btn { width: auto; flex: 1; min-width: 70px; padding: 8px; font-size: 12px; margin: 0; }
+    .bot-links { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 13px; border-top: 1px solid var(--border); padding-top: 8px; }
+    
+    .badge { padding: 3px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; display: inline-block; }
     .badge-success { background: rgba(16,185,129,0.2); color: #10b981; }
     .badge-danger { background: rgba(239,68,68,0.2); color: #ef4444; }
+    a { color: var(--primary); text-decoration: none; }
 </style>
 '''
 
@@ -871,9 +875,9 @@ LOGIN_TEMPLATE = f'''
 <html>
 <head><title>Login - Panel</title>{COMMON_STYLE}</head>
 <body>
-    <div class="card" style="margin-top: 50px;">
-        <h2 style="color: var(--primary); margin-bottom: 5px; font-size: 28px; tracking: -0.5px;">CLOUD PANEL</h2>
-        <p style="color: #6b7280; margin-top: 0; font-size: 14px;">Sign in to manage your bot services</p>
+    <div class="card" style="max-width: 420px; margin-top: 40px;">
+        <h2 style="color: var(--primary); margin-bottom: 5px; font-size: 26px; text-align: center;">CLOUD PANEL</h2>
+        <p style="color: #64748b; margin-top: 0; font-size: 14px; text-align: center;">Sign in to manage your services</p>
         
         {{% if error %}}<div class="flash" style="border-left-color: var(--danger); color: #f87171;">{{{{ error }}}}</div>{{% endif %}}
         
@@ -892,16 +896,16 @@ DASHBOARD_TEMPLATE = f'''
 <html>
 <head><title>Dashboard</title>{COMMON_STYLE}</head>
 <body>
-    <div class="card" style="max-width: 800px; text-align: left;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <h2>Welcome, {{{{ session['username'] }}}} 👋</h2>
-            <a href="/logout" class="btn btn-danger" style="width: auto; padding: 8px 15px; margin:0;">Logout</a>
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
+            <h2 style="margin: 0; font-size: 20px;">Welcome, {{{{ session['username'] }}}} 👋</h2>
+            <a href="/logout" class="btn btn-danger" style="width: auto; padding: 6px 15px; margin:0;">Logout</a>
         </div>
         
-        <div style="background: #1f2937; padding: 15px; border-radius: 8px; margin: 15px 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
-            <div><span style="color:#6b7280; font-size:12px;">BOTS LIMIT</span><br><strong>{{{{ app_count }}}} / {{{{ limits['max_bots'] }}}}</strong></div>
-            <div><span style="color:#6b7280; font-size:12px;">RAM ALLOCATED</span><br><strong>{{{{ limits['ram'] }}}}</strong></div>
-            <div><span style="color:#6b7280; font-size:12px;">STORAGE</span><br><strong>{{{{ limits['storage'] }}}}</strong></div>
+        <div style="background: #1e293b; padding: 12px; border-radius: 8px; margin: 15px 0; display: flex; justify-content: space-between; text-align: center; gap: 5px; font-size: 13px;">
+            <div style="flex:1;"><span style="color:#64748b; font-size:11px;">BOTS</span><br><strong>{{{{ app_count }}}} / {{{{ limits['max_bots'] }}}}</strong></div>
+            <div style="flex:1; border-left: 1px solid var(--border); border-right: 1px solid var(--border);"><span style="color:#64748b; font-size:11px;">RAM</span><br><strong>{{{{ limits['ram'] }}}}</strong></div>
+            <div style="flex:1;"><span style="color:#64748b; font-size:11px;">STORAGE</span><br><strong>{{{{ limits['storage'] }}}}</strong></div>
         </div>
 
         {{% with messages = get_flashed_messages(with_categories=true) %}}
@@ -912,38 +916,43 @@ DASHBOARD_TEMPLATE = f'''
             {{% endif %}}
         {{% endwith %}}
 
-        <h3>📤 Upload New Bot Bundle</h3>
-        <form action="/upload" method="POST" enctype="multipart/form-data" style="display: flex; gap: 10px; align-items: center;">
+        <h3 style="margin-top: 20px; font-size: 16px;">📤 Upload New Bot Bundle</h3>
+        <form action="/upload" method="POST" enctype="multipart/form-data" style="display: flex; flex-direction: column; gap: 5px;">
             <input type="file" name="file" accept=".zip" required style="margin:0;">
-            <button type="submit" class="btn-success" style="width: auto; margin:0; white-space: nowrap;">Deploy ZIP</button>
+            <button type="submit" class="btn-success" style="margin-top: 5px;">Deploy ZIP</button>
         </form>
 
-        <h3 style="margin-top: 30px;">🤖 Your Active Bots</h3>
+        <h3 style="margin-top: 25px; font-size: 16px; border-bottom: 1px solid var(--border); padding-bottom: 5px;">🤖 Deployed Bots</h3>
         {{% if not apps %}}
-            <p style="color: #6b7280;">No bots deployed yet. Upload a ZIP file to get started.</p>
+            <p style="color: #64748b; font-size: 14px;">No bots uploaded yet.</p>
         {{% else %}}
             {{% for app in apps %}}
-            <div style="background: #111827; border: 1px solid var(--border); padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+            <div class="bot-item">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div>
-                        <strong style="font-size: 16px; color: var(--primary);">{{{{ app.name }}}}</strong>
+                        <strong style="font-size: 15px; color: var(--primary);">{{{{ app.name }}}}</strong>
                         {{% if app.running %}}
-                            <span class="badge badge-success">🟢 RUNNING</span>
+                            <span class="badge badge-success">RUNNING</span>
                         {{% else %}}
-                            <span class="badge badge-danger">🔴 STOPPED</span>
+                            <span class="badge badge-danger">STOPPED</span>
                         {{% endif %}}
-                        <br><span style="font-size:12px; color:#6b7280;">Startup: {{{{ app.startup_file }}}}</span>
-                    </div>
-                    <div style="display: flex; gap: 5px;">
-                        <a href="/run/{{{{ app.name }}}}" class="btn btn-success" style="padding: 6px 12px; margin:0; font-size:13px; width:auto;">Start</a>
-                        <a href="/stop/{{{{ app.name }}}}" class="btn btn-danger" style="padding: 6px 12px; margin:0; font-size:13px; width:auto;">Stop</a>
-                        <a href="/restart/{{{{ app.name }}}}" class="btn btn-secondary" style="padding: 6px 12px; margin:0; font-size:13px; width:auto;">Restart</a>
+                        <div style="font-size:12px; color:#64748b; margin-top:2px;">Startup: {{{{ app.startup_file }}}}</div>
                     </div>
                 </div>
-                <div style="margin-top: 10px; display: flex; gap: 10px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px;">
-                    <a href="/console/{{{{ app.name }}}}" style="font-weight: bold;">🖥️ Live Console</a> | 
-                    <a href="/files/{{{{ app.name }}}}" style="font-weight: bold;">📁 File Manager</a> | 
-                    <a href="/startup/{{{{ app.name }}}}" style="font-weight: bold;">⚙️ Startup File</a> | 
+                
+                <div class="bot-controls">
+                    <a href="/run/{{{{ app.name }}}}" class="btn btn-success">Start</a>
+                    <a href="/stop/{{{{ app.name }}}}" class="btn btn-danger">Stop</a>
+                    <a href="/restart/{{{{ app.name }}}}" class="btn btn-secondary">Restart</a>
+                </div>
+                
+                <div class="bot-links">
+                    <a href="/console/{{{{ app.name }}}}" style="font-weight: bold;">🖥️ Live Console</a> 
+                    <span style="color: var(--border);">|</span>
+                    <a href="/files/{{{{ app.name }}}}" style="font-weight: bold;">📁 Files</a> 
+                    <span style="color: var(--border);">|</span>
+                    <a href="/startup/{{{{ app.name }}}}" style="font-weight: bold;">⚙️ Startup File</a> 
+                    <span style="color: var(--border);">|</span>
                     <a href="/delete/{{{{ app.name }}}}" style="color: var(--danger);" onclick="return confirm('Delete this bot?')">🗑️ Delete</a>
                 </div>
             </div>
@@ -959,13 +968,13 @@ ADMIN_LOGIN_TEMPLATE = f'''
 <html>
 <head><title>Admin Gate</title>{COMMON_STYLE}</head>
 <body>
-    <div class="card" style="margin-top: 60px;">
-        <h2>Admin Master Security</h2>
-        {{% if error %}}<p style="color:var(--danger)">{{{{ error }}}}</p>{{% endif %}}
+    <div class="card" style="max-width: 420px; margin-top: 50px;">
+        <h2 style="text-align: center; color: var(--danger);">Admin Security Login</h2>
+        {{% if error %}}<p style="color:var(--danger); text-align: center;">{{{{ error }}}}</p>{{% endif %}}
         <form method="POST">
             <input type="text" name="u" placeholder="Secure Username" required>
             <input type="password" name="p" placeholder="Secure Password" required>
-            <button type="submit" class="btn-danger">Unlock Admin Console</button>
+            <button type="submit" class="btn-danger">Unlock Panel</button>
         </form>
     </div>
 </body>
@@ -975,12 +984,12 @@ ADMIN_LOGIN_TEMPLATE = f'''
 ADMIN_DASHBOARD_TEMPLATE = f'''
 <!DOCTYPE html>
 <html>
-<head><title>Master Admin Control</title>{COMMON_STYLE}</head>
+<head><title>Admin Control</title>{COMMON_STYLE}</head>
 <body>
-    <div class="card" style="max-width: 900px; text-align: left;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <h2>🛠️ Master Administration Panel</h2>
-            <a href="/logout" class="btn btn-danger" style="width: auto; padding: 8px 15px; margin:0;">Logout</a>
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
+            <h2 style="margin: 0; font-size: 20px;">🛠️ Master Control Panel</h2>
+            <a href="/logout" class="btn btn-danger" style="width: auto; padding: 6px 15px; margin:0;">Logout</a>
         </div>
         
         {{% with messages = get_flashed_messages(with_categories=true) %}}
@@ -991,64 +1000,68 @@ ADMIN_DASHBOARD_TEMPLATE = f'''
             {{% endif %}}
         {{% endwith %}}
 
-        <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 20px; margin-top: 20px;">
-            <div style="background: #111827; border: 1px solid var(--border); padding: 15px; border-radius: 8px; height: fit-content;">
-                <h3 style="color: var(--primary); margin-top:0;">👤 Configure Account</h3>
+        <div class="responsive-grid" style="margin-top: 15px;">
+            <div style="background: #1e293b; padding: 15px; border-radius: 8px; height: fit-content;">
+                <h3 style="color: var(--primary); margin-top:0; font-size:16px;">👤 Configure Account</h3>
                 <form method="POST">
                     <input type="hidden" name="action" value="save_user">
                     <input type="text" name="username" placeholder="Username" required>
-                    <input type="text" name="password" placeholder="Password/Access Key" required>
-                    <input type="number" name="max_bots" placeholder="Bot Limits (Count)" min="1" value="1" required>
+                    <input type="text" name="password" placeholder="Password" required>
+                    <input type="number" name="max_bots" placeholder="Bot Limits" min="1" value="1" required>
                     <input type="text" name="ram" placeholder="RAM Allocation" value="512 MB">
                     <input type="text" name="storage" placeholder="Storage Allocation" value="1 GB">
-                    <button type="submit" class="btn-success">Save Account</button>
+                    <button type="submit" class="btn-success">Save User</button>
                 </form>
                 
-                <h4 style="margin-top: 20px; color: var(--danger);">⚠️ Remove Account</h4>
-                <form method="POST" onsubmit="return confirm('Are you sure you want to completely delete this user?')">
+                <h4 style="margin-top: 15px; color: var(--danger); font-size: 14px; margin-bottom: 5px;">⚠️ Remove Account</h4>
+                <form method="POST" onsubmit="return confirm('Completely delete this user?')">
                     <input type="hidden" name="action" value="delete_user">
-                    <select name="username" required>
+                    <select name="username" required style="margin: 0 0 8px 0;">
                         <option value="">-- Select User --</option>
                         {{% for u in users %}} <option value="{{{{u}}}}">{{{{u}}}}</option> {{% endfor %}}
                     </select>
-                    <button type="submit" class="btn-danger">Delete User Account</button>
+                    <button type="submit" class="btn-danger">Delete User</button>
                 </form>
             </div>
 
             <div>
-                <h3 style="margin-top:0;">👥 System Registered Users Details</h3>
-                <table>
-                    <tr><th>User</th><th>Password</th><th>Max Bots</th><th>RAM/Storage</th></tr>
-                    {{% for u, p in users.items() %}}
-                    <tr>
-                        <td><strong>{{{{ u }}}}</strong></td>
-                        <td><code>{{{{ p }}}}</code></td>
-                        <td>{{{{ limits[u]['max_bots'] if u in limits else 1 }}}}</td>
-                        <td>{{{{ limits[u]['ram'] if u in limits else '512 MB' }}}} / {{{{ limits[u]['storage'] if u in limits else '1 GB' }}}}</td>
-                    </tr>
-                    {{% endfor %}}
-                </table>
+                <h3 style="margin-top:0; font-size:16px;">👥 System Users</h3>
+                <div class="table-container">
+                    <table>
+                        <tr><th>User</th><th>Pass</th><th>Limit</th><th>RAM/Disk</th></tr>
+                        {{% for u, p in users.items() %}}
+                        <tr>
+                            <td><strong>{{{{ u }}}}</strong></td>
+                            <td><code>{{{{ p }}}}</code></td>
+                            <td>{{{{ limits[u]['max_bots'] if u in limits else 1 }}}}</td>
+                            <td>{{{{ limits[u]['ram'] if u in limits else '512M' }}}}/{{{{ limits[u]['storage'] if u in limits else '1G' }}}}</td>
+                        </tr>
+                        {{% endfor %}}
+                    </table>
+                </div>
 
-                <h3 style="margin-top: 30px;">📊 Active Running User Instances</h3>
-                <table>
-                    <tr><th>User</th><th>Bot Name</th><th>Status</th><th>Actions</th></tr>
-                    {{% for b in bots_list %}}
-                    <tr>
-                        <td>{{{{ b.user }}}}</td>
-                        <td>{{{{ b.name }}}}</td>
-                        <td>
-                            {{% if b.running %}} <span class="badge badge-success">🟢 Active</span> 
-                            {{% else %}} <span class="badge badge-danger">🔴 Idle</span> {{% endif %}}
-                        </td>
-                        <td>
-                            <a href="/admin/download/{{{{b.user}}}}/{{{{b.name}}}}" style="color: var(--primary); font-weight: bold; font-size:12px;">📥 ZIP</a> |
-                            <a href="/admin/run/{{{{b.user}}}}/{{{{b.name}}}}" style="color: var(--success); font-weight: bold; font-size:12px;">Boot</a> |
-                            <a href="/admin/stop/{{{{b.user}}}}/{{{{b.name}}}}" style="color: var(--danger); font-weight: bold; font-size:12px;">Kill</a> |
-                            <a href="/admin/delete/{{{{b.user}}}}/{{{{b.name}}}}" style="color: #6b7280; font-size:12px;" onclick="return confirm('Wipe instance?')">Wipe</a>
-                        </td>
-                    </tr>
-                    {{% endfor %}}
-                </table>
+                <h3 style="margin-top: 20px; font-size:16px;">📊 Active Running Logs</h3>
+                <div class="table-container">
+                    <table>
+                        <tr><th>User</th><th>Bot Name</th><th>Status</th><th>Actions</th></tr>
+                        {{% for b in bots_list %}}
+                        <tr>
+                            <td>{{{{ b.user }}}}</td>
+                            <td>{{{{ b.name }}}}</td>
+                            <td>
+                                {{% if b.running %}} <span class="badge badge-success">Active</span> 
+                                {{% else %}} <span class="badge badge-danger">Idle</span> {{% endif %}}
+                            </td>
+                            <td>
+                                <a href="/admin/download/{{{{b.user}}}}/{{{{b.name}}}}" style="color: var(--primary); font-weight: bold;">📥 ZIP</a> |
+                                <a href="/admin/run/{{{{b.user}}}}/{{{{b.name}}}}" style="color: var(--success); font-weight: bold;">Boot</a> |
+                                <a href="/admin/stop/{{{{b.user}}}}/{{{{b.name}}}}" style="color: var(--danger); font-weight: bold;">Kill</a> |
+                                <a href="/admin/delete/{{{{b.user}}}}/{{{{b.name}}}}" style="color: #64748b;" onclick="return confirm('Wipe instance?')">Wipe</a>
+                            </td>
+                        </tr>
+                        {{% endfor %}}
+                    </table>
+                </div>
             </div>
         </div>
     </div>
@@ -1063,25 +1076,26 @@ CONSOLE_TEMPLATE = '''
     <title>Live Terminal Console</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #05070f; color: #00ff66; font-family: monospace; padding: 20px; margin: 0; }
-        .header { background: #111; padding: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; color: white; }
-        #terminal { background: #000; border: 1px solid #222; padding: 15px; height: 60vh; overflow-y: auto; border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
-        .input-line { display: flex; margin-top: 10px; background: #000; border: 1px solid #222; padding: 5px; border-radius: 6px; }
-        .input-line span { color: #00ff66; padding-right: 5px; font-weight: bold; }
+        * { box-sizing: border-box; }
+        body { background: #05070f; color: #00ff66; font-family: monospace; padding: 10px; margin: 0; }
+        .header { background: #1e293b; padding: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; color: white; font-family: sans-serif; font-size:14px; flex-wrap: wrap; gap: 5px; }
+        #terminal { background: #000; border: 1px solid #1e293b; padding: 10px; height: 65vh; overflow-y: auto; border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 13px; }
+        .input-line { display: flex; margin-top: 10px; background: #000; border: 1px solid #1e293b; padding: 10px; border-radius: 6px; align-items: center; }
+        .input-line span { color: #00ff66; padding-right: 8px; font-weight: bold; }
         #cmd { background: transparent; border: none; color: white; flex-grow: 1; outline: none; font-family: monospace; font-size: 14px; }
     </style>
 </head>
 <body>
     <div class="header">
         <span>Instance Logs: <strong>{{ bot_name }}</strong></span>
-        <a href="/dashboard" style="color:#00f0ff; text-decoration:none;">Back to Home</a>
+        <a href="/dashboard" style="color:#00f0ff; text-decoration:none; font-weight: bold;">Back Home</a>
     </div>
     
     <div id="terminal">{{ output }}</div>
     
     <div class="input-line">
         <span>$</span>
-        <input type="text" id="cmd" placeholder="Send continuous standard input stream down to script thread..." autocomplete="off">
+        <input type="text" id="cmd" placeholder="Send manual inputs stream down to process script thread..." autocomplete="off">
     </div>
 
     <script>
@@ -1122,55 +1136,58 @@ FILE_MANAGER_TEMPLATE = '''
     <title>Storage Matrix Explorer</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #090d16; color: #f3f4f6; font-family: sans-serif; padding: 20px; margin:0;}
-        .container { max-width: 900px; margin: 0 auto; background: #111827; padding: 25px; border-radius: 12px; border: 1px solid #1f2937; }
-        .header { display: flex; justify-content: space-between; margin-bottom: 20px; border-bottom: 1px solid #1f2937; padding-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #1f2937; font-size:14px; }
-        th { background: #1f2937; color: #00f0ff; }
-        .actions-bar { margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap; }
-        button, input[type="button"] { background: #00f0ff; color: black; font-weight: bold; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; }
-        .danger { background: #ef4444; color: white; }
+        * { box-sizing: border-box; }
+        body { background: #070b12; color: #f3f4f6; font-family: sans-serif; padding: 10px; margin:0;}
+        .container { width: 100%; max-width: 850px; margin: 0 auto; background: #0f172a; padding: 15px; border-radius: 12px; border: 1px solid #1e293b; }
+        .header { display: flex; justify-content: space-between; margin-bottom: 15px; border-bottom: 1px solid #1e293b; padding-bottom: 10px; flex-wrap: wrap; gap: 5px; }
+        .table-container { width: 100%; overflow-x: auto; border: 1px solid #1e293b; border-radius: 6px; }
+        table { width: 100%; border-collapse: collapse; min-width: 500px; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #1e293b; font-size:13px; }
+        th { background: #1e293b; color: #00f0ff; }
+        .actions-bar { margin-bottom: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+        button, .btn-action { background: #00f0ff; color: black; font-weight: bold; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
-        <h3>Files Explorer: <span style="color:#00f0ff;">{{ bot_name }}</span></h3>
-        <a href="/dashboard" style="color:#00f0ff; text-decoration:none;">Back to Main Screen</a>
+        <h3 style="margin:0;">Files Explorer: <span style="color:#00f0ff;">{{ bot_name }}</span></h3>
+        <a href="/dashboard" style="color:#00f0ff; text-decoration:none; font-weight: bold;">Back Dashboard</a>
     </div>
     
-    <p>Current Path: <code>/{{ current_path }}</code></p>
+    <p style="font-size:13px; margin: 5px 0 10px 0;">Current Path: <code>/{{ current_path }}</code></p>
     
     <div class="actions-bar">
         <button onclick="mkdir()">New Folder</button>
         <input type="file" id="file_uploader" style="display: none;" onchange="uploadFile()">
         <button onclick="document.getElementById('file_uploader').click()">Upload File</button>
         {% if current_path %}
-            <button onclick="window.location.href='?path={{ current_path.split('/')[:-1]|join('/') }}'" style="background:#374151; color:white;">⬅ Up</button>
+            <button onclick="window.location.href='?path={{ current_path.split('/')[:-1]|join('/') }}'" style="background:#334155; color:white;">⬅ Up</button>
         {% endif %}
     </div>
 
-    <table>
-        <tr><th>Name</th><th>Modified</th><th>Size</th><th>Controls</th></tr>
-        {% for item in items %}
-        <tr>
-            <td>
-                {% if item.is_dir %}
-                    📁 <a href="?path={{ item.path }}" style="font-weight: bold; color: #00f0ff;">{{ item.name }}/</a>
-                {% else %}
-                    📄 <a href="/files/{{ bot_name }}/edit?path={{ item.path }}" style="color: white;">{{ item.name }}</a>
-                {% endif %}
-            </td>
-            <td>{{ item.modified }}</td>
-            <td>{{ (item.size / 1024)|round(1) }} KB</td>
-            <td>
-                <a href="#" onclick="rename('{{ item.path }}')" style="color:#10b981; margin-right: 10px; font-size:12px;">Rename</a>
-                <a href="#" onclick="deleteItem('{{ item.path }}')" style="color:#ef4444; font-size:12px;">Delete</a>
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-container">
+        <table>
+            <tr><th>Name</th><th>Modified</th><th>Size</th><th>Controls</th></tr>
+            {% for item in items %}
+            <tr>
+                <td>
+                    {% if item.is_dir %}
+                        📁 <a href="?path={{ item.path }}" style="font-weight: bold; color: #00f0ff;">{{ item.name }}/</a>
+                    {% else %}
+                        📄 <a href="/files/{{ bot_name }}/edit?path={{ item.path }}" style="color: white;">{{ item.name }}</a>
+                    {% endif %}
+                </td>
+                <td style="color:#64748b; font-size:12px;">{{ item.modified }}</td>
+                <td>{{ (item.size / 1024)|round(1) }} KB</td>
+                <td>
+                    <a href="#" onclick="rename('{{ item.path }}')" style="color:#10b981; margin-right: 8px; font-size:12px;">Rename</a> |
+                    <a href="#" onclick="deleteItem('{{ item.path }}')" style="color:#ef4444; font-size:12px;">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
 </div>
 
 <script>
@@ -1231,23 +1248,25 @@ EDIT_FILE_TEMPLATE = '''
     <title>Edit - Code Workspace</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #090d16; color: white; font-family: sans-serif; padding: 20px; margin:0;}
-        .box { max-width: 1000px; margin:0 auto; background: #111827; padding:20px; border-radius:12px;}
-        textarea { width: 100%; height: 65vh; background: #000; color: #00ff66; font-family: monospace; padding:15px; border-radius:6px; border:1px solid #1f2937; font-size:14px; resize:vertical; outline:none;}
-        .row { display: flex; justify-content: space-between; margin-bottom: 15px; align-items:center;}
-        button { background: #10b981; color: white; font-weight: bold; padding: 10px 25px; border: none; border-radius: 4px; cursor: pointer; }
+        * { box-sizing: border-box; }
+        body { background: #070b12; color: white; font-family: sans-serif; padding: 10px; margin:0;}
+        .box { width: 100%; max-width: 950px; margin:0 auto; background: #0f172a; padding:15px; border-radius:12px; border: 1px solid #1e293b;}
+        textarea { width: 100%; height: 68vh; background: #000; color: #00ff66; font-family: monospace; padding:10px; border-radius:6px; border:1px solid #1e293b; font-size:13px; resize:vertical; outline:none;}
+        .row { display: flex; justify-content: space-between; margin-bottom: 12px; align-items:center; flex-wrap: wrap; gap: 5px;}
+        button { background: #10b981; color: white; font-weight: bold; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-size:15px; }
+        @media(min-width: 600px){ button { width: auto; } }
     </style>
 </head>
 <body>
 <div class="box">
     <div class="row">
-        <h3>Editing: <span style="color:#00f0ff;">{{ filepath }}</span></h3>
-        <a href="/files/{{ bot_name }}" style="color:#00f0ff; text-decoration:none;">Discard Changes</a>
+        <h3 style="margin:0; font-size:15px;">Editing: <span style="color:#00f0ff;">{{ filepath }}</span></h3>
+        <a href="/files/{{ bot_name }}" style="color:#00f0ff; text-decoration:none; font-weight: bold;">Discard Changes</a>
     </div>
     
     <textarea id="editor">{{ content }}</textarea>
     <br><br>
-    <button onclick="saveFile()">💾 Save Script Modifications</button>
+    <button onclick="saveFile()">💾 Save Script</button>
 </div>
 
 <script>
@@ -1258,7 +1277,7 @@ function saveFile() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({path: '{{ filepath }}', content: text})
     }).then(res => res.json()).then(data => {
-        if(data.success) alert("Script successfully compiled and saved down to disk!");
+        if(data.success) alert("Script successfully saved down to disk!");
         else alert(data.error);
     });
 }
@@ -1274,28 +1293,28 @@ STARTUP_TEMPLATE = '''
     <title>Startup Configuration</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #090d16; color: white; font-family: sans-serif; padding: 20px;}
-        .box { max-width: 500px; margin: 40px auto; background: #111827; padding:25px; border-radius:12px; border:1px solid #1f2937;}
-        select, button { width: 100%; padding:12px; margin-top:15px; border-radius:6px; font-size:15px;}
+        * { box-sizing: border-box; }
+        body { background: #070b12; color: white; font-family: sans-serif; padding: 15px;}
+        .box { width: 100%; max-width: 460px; margin: 30px auto; background: #0f172a; padding:20px; border-radius:12px; border:1px solid #1e293b;}
+        select, button { width: 100%; padding:12px; margin-top:12px; border-radius:6px; font-size:15px;}
         button { background: #00f0ff; color: black; font-weight: bold; border:none; cursor: pointer;}
     </style>
 </head>
 <body>
 <div class="box">
-    <h3>Configure Startup Hook</h3>
-    <p style="color:#6b7280; font-size:13px;">Select which file standard engine will execute on booting up the cluster runner.</p>
+    <h3 style="margin-top:0;">Configure Startup File</h3>
+    <p style="color:#64748b; font-size:13px; margin: 5px 0;">Select which primary entry script file the server engine will trigger on execution boot.</p>
     
     <form method="POST">
-        <label>Primary Entry File Pointer:</label>
         <select name="startup_file">
             {% for f in files %}
                 <option value="{{ f }}" {% if f == current %}selected{% endif %}>{{ f }}</option>
             {% endfor %}
         </select>
-        <button type="submit">Update Setup Vector</button>
+        <button type="submit">Update Vector Script</button>
     </form>
     <br>
-    <center><a href="/dashboard" style="color: #6b7280; font-size: 13px;">Return to Dashboard</a></center>
+    <center><a href="/dashboard" style="color: #64748b; font-size: 13px; text-decoration: underline;">Return Dashboard</a></center>
 </div>
 </body>
 </html>

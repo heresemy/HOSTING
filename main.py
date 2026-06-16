@@ -50,7 +50,7 @@ def get_info(uid: str = Query(None), password: str = Query(None)):
         return {"status": False, "message": "Enter uid & password"}
 
     # 1. Get JWT
-    jwt_url = f"https://jwtsemygen.vercel.app/token?key=SEMY&uid={uid}&password={password}"
+    jwt_url = f"https://pjwt.vercel.app/token?key=SEMY&uid={uid}&password={password}"
     try:
         jwt_res = requests.get(jwt_url, timeout=10)
         jwt_json = jwt_res.json()

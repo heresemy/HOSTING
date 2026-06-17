@@ -1,3 +1,3 @@
-fastapi
-uvicorn
+pyTelegramBotAPI
+flask
 requests

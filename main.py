@@ -1,351 +1,393 @@
-import os
+BAR"rt os
 import sys
 import subprocess
 import threading
+import queue
 import time
+import sqlite3
 import signal
-import json
-import shutil
-import hashlib
 from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
+from werkzeug.utils import secure_filename
 
 # ============================================================
 #  CONFIG
 # ============================================================
-APP_SECRET = "your-secret-key-here"
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin123"
-FILES_DIR = "files"
+APP_SECRET = "your-secret-key-here-change-in-production"
+ADMIN_USERNAME = "ULTRAVPS1X0"
+ADMIN_PASSWORD = "XYZ5566"
+DB_PATH = "panel.db"
 PID_FILE = "bot.pid"
 LOG_FILE = "bot.log"
-SETTINGS_FILE = "settings.json"
-REQUIREMENTS_HASH_FILE = "requirements_hash.txt"
-VENV_DIR = "venv"
+BOT_FILES_DIR = "botfiles"
 
-os.makedirs(FILES_DIR, exist_ok=True)
-
+# ============================================================
+#  FLASK APP
+# ============================================================
 app = Flask(__name__)
 app.secret_key = APP_SECRET
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+
+if not os.path.exists(BOT_FILES_DIR):
+    os.makedirs(BOT_FILES_DIR)
 
 # ============================================================
-#  SETTINGS
+#  DATABASE SETUP
 # ============================================================
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r") as f:
-            return json.load(f)
-    return {"main_file": "bot.py"}
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT
+        )
+    ''')
+    c.execute("INSERT OR IGNORE INTO users (id, username, password) VALUES (1, ?, ?)",
+              (ADMIN_USERNAME, ADMIN_PASSWORD))
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('main_file', 'bot.py')")
+    conn.commit()
+    conn.close()
 
-def save_settings(settings):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
+def get_setting(key):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
-def get_main_file():
-    return load_settings().get("main_file", "bot.py")
-
-def set_main_file(filename):
-    settings = load_settings()
-    settings["main_file"] = filename
-    save_settings(settings)
-
-def get_requirements_hash():
-    req_path = os.path.join(FILES_DIR, "requirements.txt")
-    if not os.path.exists(req_path):
-        return None
-    with open(req_path, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
-
-def get_stored_hash():
-    hash_path = os.path.join(FILES_DIR, REQUIREMENTS_HASH_FILE)
-    if os.path.exists(hash_path):
-        with open(hash_path, "r") as f:
-            return f.read().strip()
-    return None
-
-def store_hash(hash_value):
-    hash_path = os.path.join(FILES_DIR, REQUIREMENTS_HASH_FILE)
-    with open(hash_path, "w") as f:
-        f.write(hash_value)
-
-def get_venv_python():
-    if sys.platform == "win32":
-        return os.path.join(FILES_DIR, VENV_DIR, "Scripts", "python.exe")
-    return os.path.join(FILES_DIR, VENV_DIR, "bin", "python")
-
-def get_venv_pip():
-    if sys.platform == "win32":
-        return os.path.join(FILES_DIR, VENV_DIR, "Scripts", "pip.exe")
-    return os.path.join(FILES_DIR, VENV_DIR, "bin", "pip")
+def set_setting(key, value):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
 
 # ============================================================
-#  GLOBAL STATE
+#  BOT PROCESS MANAGEMENT
 # ============================================================
 bot_process = None
-bot_log_lines = []
-bot_log_lock = threading.Lock()
+bot_logs = queue.Queue(maxsize=5000)
 bot_running = False
 bot_status = "Stopped"
-bot_status_msg = ""
+bot_status_message = ""
 bot_start_time = None
-MAX_LOG_LINES = 5000
 
-# ============================================================
-#  LOGGING
-# ============================================================
-def add_log(msg, level="INFO"):
+def clear_logs():
+    while not bot_logs.empty():
+        try:
+            bot_logs.get_nowait()
+        except queue.Empty:
+            break
+
+def add_log(message, level="INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"[{timestamp}] [{level}] {msg}"
-    with bot_log_lock:
-        bot_log_lines.append(entry)
-        if len(bot_log_lines) > MAX_LOG_LINES:
-            bot_log_lines = bot_log_lines[-MAX_LOG_LINES:]
-    log_path = os.path.join(FILES_DIR, LOG_FILE)
+    entry = f"[{timestamp}] [{level}] {message}"
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
+        bot_logs.put_nowait(entry)
+    except queue.Full:
+        try:
+            bot_logs.get_nowait()
+            bot_logs.put_nowait(entry)
+        except:
+            pass
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
     except:
         pass
 
-def clear_logs():
-    with bot_log_lock:
-        bot_log_lines.clear()
+def read_output(pipe, is_stderr=False):
+    for line in iter(pipe.readline, b''):
+        if line:
+            try:
+                msg = line.decode("utf-8", errors="replace").strip()
+                if msg:
+                    add_log(msg, "ERR" if is_stderr else "OUT")
+            except:
+                pass
+    pipe.close()
 
-def get_logs(limit=200):
-    with bot_log_lock:
-        return bot_log_lines[-limit:] if bot_log_lines else []
-
-# ============================================================
-#  VENV & REQUIREMENTS MANAGEMENT
-# ============================================================
-def setup_venv_and_requirements():
-    """Create venv if needed, install requirements if changed."""
-    venv_path = os.path.join(FILES_DIR, VENV_DIR)
-    req_path = os.path.join(FILES_DIR, "requirements.txt")
-    
-    current_hash = get_requirements_hash()
-    stored_hash = get_stored_hash()
-    
-    # If requirements.txt doesn't exist, remove venv and hash
-    if current_hash is None:
-        if os.path.exists(venv_path):
-            add_log("Requirements.txt removed, deleting venv...", "WARN")
-            shutil.rmtree(venv_path, ignore_errors=True)
-        if os.path.exists(os.path.join(FILES_DIR, REQUIREMENTS_HASH_FILE)):
-            os.remove(os.path.join(FILES_DIR, REQUIREMENTS_HASH_FILE))
+def install_requirements():
+    req_file = os.path.join(BOT_FILES_DIR, "requirements.txt")
+    if not os.path.exists(req_file):
+        add_log("No requirements.txt found", "WARN")
         return True
-    
-    # If hash changed or venv doesn't exist, rebuild
-    if current_hash != stored_hash or not os.path.exists(venv_path):
-        add_log("Requirements changed or venv missing, rebuilding...", "INFO")
-        
-        # Delete old venv if exists
-        if os.path.exists(venv_path):
-            shutil.rmtree(venv_path, ignore_errors=True)
-            add_log("Old venv deleted", "INFO")
-        
-        # Create new venv
-        add_log("Creating virtual environment...", "INFO")
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "venv", venv_path],
-                cwd=FILES_DIR,
-                check=True,
-                capture_output=True,
-                timeout=60
-            )
-            add_log("Virtual environment created", "INFO")
-        except Exception as e:
-            add_log(f"Failed to create venv: {e}", "ERROR")
-            return False
-        
-        # Install requirements
-        add_log("Installing requirements in venv...", "INFO")
-        try:
-            pip_path = get_venv_pip()
-            result = subprocess.run(
-                [pip_path, "install", "-r", "requirements.txt"],
-                cwd=FILES_DIR,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
+    add_log("Installing requirements from requirements.txt...", "INFO")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", req_file],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
             add_log("Requirements installed successfully", "INFO")
-            for line in result.stdout.splitlines()[-10:]:
+            for line in result.stdout.splitlines():
                 if line.strip():
                     add_log(f"pip: {line.strip()}", "OUT")
-            # Store new hash
-            store_hash(current_hash)
             return True
-        except subprocess.TimeoutExpired:
-            add_log("Requirements installation timed out", "ERROR")
+        else:
+            add_log(f"Failed to install requirements (code {result.returncode})", "ERROR")
+            for line in result.stderr.splitlines():
+                if line.strip():
+                    add_log(f"pip error: {line.strip()}", "ERR")
             return False
-        except Exception as e:
-            add_log(f"Requirements installation failed: {e}", "ERROR")
+    except subprocess.TimeoutExpired:
+        add_log("Requirements installation timed out", "ERROR")
+        return False
+    except Exception as e:
+        add_log(f"Error installing requirements: {str(e)}", "ERROR")
+        return False
+
+def start_bot():
+    global bot_process, bot_running, bot_status, bot_status_message, bot_start_time
+    if bot_running:
+        add_log("Bot is already running", "WARN")
+        return False
+
+    # Clear logs on new start
+    clear_logs()
+    
+    main_file = get_setting("main_file") or "bot.py"
+    main_file_path = os.path.join(BOT_FILES_DIR, main_file)
+    
+    py_files = [f for f in os.listdir(BOT_FILES_DIR) if f.endswith(".py") and os.path.isfile(os.path.join(BOT_FILES_DIR, f))]
+    
+    if not os.path.exists(main_file_path):
+        if len(py_files) == 1:
+            main_file = py_files[0]
+            set_setting("main_file", main_file)
+            main_file_path = os.path.join(BOT_FILES_DIR, main_file)
+            add_log(f"Auto-detected main file: {main_file}", "INFO")
+        else:
+            add_log(f"Main file '{main_file}' not found", "ERROR")
+            bot_status = "Error"
+            bot_status_message = f"Main file '{main_file}' not found"
             return False
     
-    add_log("Requirements already up to date", "INFO")
-    return True
-
-# ============================================================
-#  BOT CONTROL
-# ============================================================
-def start_bot():
-    global bot_process, bot_running, bot_status, bot_status_msg, bot_start_time
-
-    if bot_running:
-        add_log("Bot already running", "WARN")
+    if not os.path.exists(main_file_path):
+        add_log(f"Main file '{main_file}' not found in botfiles", "ERROR")
+        bot_status = "Error"
+        bot_status_message = f"Main file '{main_file}' not found"
         return False
 
-    main_file = get_main_file()
-    main_path = os.path.join(FILES_DIR, main_file)
-    if not os.path.exists(main_path):
-        add_log(f"Main file '{main_file}' not found", "ERROR")
+    if not install_requirements():
         bot_status = "Error"
-        bot_status_msg = "Main file missing"
-        return False
-
-    # Setup venv and install requirements
-    if not setup_venv_and_requirements():
-        bot_status = "Error"
-        bot_status_msg = "Venv/requirements setup failed"
+        bot_status_message = "Failed to install requirements"
         return False
 
     add_log(f"Starting bot: {main_file}", "INFO")
     bot_status = "Starting"
-    bot_status_msg = "Starting..."
-
+    bot_status_message = "Starting bot..."
     try:
-        # Use venv python to run bot
-        python_path = get_venv_python()
-        if not os.path.exists(python_path):
-            add_log("Venv python not found, falling back to system python", "WARN")
-            python_path = sys.executable
-
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(f"=== Bot started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        
         bot_process = subprocess.Popen(
-            [python_path, main_file],
+            [sys.executable, main_file],
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
-            cwd=FILES_DIR,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
+            cwd=BOT_FILES_DIR,
+            env=os.environ.copy(),
+            text=False,
+            bufsize=0
         )
-
-        with open(os.path.join(FILES_DIR, PID_FILE), "w") as f:
+        with open(PID_FILE, "w") as f:
             f.write(str(bot_process.pid))
-
-        def reader():
-            while True:
-                line = bot_process.stdout.readline()
-                if not line:
-                    break
-                add_log(line.strip(), "OUT")
-        threading.Thread(target=reader, daemon=True).start()
-
+        threading.Thread(target=read_output, args=(bot_process.stdout, False), daemon=True).start()
+        threading.Thread(target=read_output, args=(bot_process.stderr, True), daemon=True).start()
         bot_running = True
         bot_start_time = datetime.now()
         bot_status = "Running"
-        bot_status_msg = "Bot running"
-        add_log(f"Started with PID {bot_process.pid}", "INFO")
+        bot_status_message = "Bot is running"
+        add_log(f"Bot started with PID {bot_process.pid}", "INFO")
         return True
-
     except Exception as e:
-        add_log(f"Start failed: {e}", "ERROR")
+        add_log(f"Failed to start bot: {str(e)}", "ERROR")
         bot_status = "Error"
-        bot_status_msg = str(e)
+        bot_status_message = f"Error: {str(e)}"
         bot_running = False
         return False
 
 def stop_bot():
-    global bot_process, bot_running, bot_status, bot_status_msg, bot_start_time
-
+    global bot_process, bot_running, bot_status, bot_status_message, bot_start_time
     if not bot_running or bot_process is None:
-        add_log("Bot not running", "WARN")
+        add_log("Bot is not running", "WARN")
+        bot_status = "Stopped"
+        bot_status_message = "Bot is stopped"
         return False
-
-    add_log("Stopping bot...", "INFO")
     bot_status = "Stopping"
-    bot_status_msg = "Stopping..."
-
+    bot_status_message = "Stopping bot..."
+    add_log(f"Stopping bot (PID {bot_process.pid})...", "INFO")
     try:
-        bot_process.terminate()
-        bot_process.wait(timeout=5)
-    except:
-        try:
-            bot_process.kill()
-        except:
-            pass
-    finally:
+        if sys.platform == "win32":
+            bot_process.terminate()
+        else:
+            os.kill(bot_process.pid, signal.SIGTERM)
+        for _ in range(30):
+            if bot_process.poll() is not None:
+                break
+            time.sleep(0.5)
+        if bot_process.poll() is None:
+            add_log("Process did not terminate, force killing...", "WARN")
+            if sys.platform == "win32":
+                bot_process.kill()
+            else:
+                os.kill(bot_process.pid, signal.SIGKILL)
+            time.sleep(0.5)
+        add_log(f"Bot stopped (exit code {bot_process.returncode})", "INFO")
         bot_running = False
         bot_status = "Stopped"
-        bot_status_msg = "Bot stopped"
+        bot_status_message = "Bot stopped"
         bot_process = None
         bot_start_time = None
-        pid_path = os.path.join(FILES_DIR, PID_FILE)
-        if os.path.exists(pid_path):
-            os.remove(pid_path)
-        add_log("Bot stopped", "INFO")
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+        # Clear logs on stop
+        clear_logs()
         return True
+    except Exception as e:
+        add_log(f"Error stopping bot: {str(e)}", "ERROR")
+        bot_status = "Error"
+        bot_status_message = f"Error stopping: {str(e)}"
+        bot_running = False
+        return False
 
 def restart_bot():
-    add_log("Restarting...", "INFO")
-    stop_bot()
-    time.sleep(1)
+    add_log("Restarting bot...", "INFO")
+    # Clear logs before restart
+    clear_logs()
+    if bot_running:
+        stop_bot()
+        time.sleep(1)
     return start_bot()
 
-def get_status():
-    global bot_running, bot_status, bot_status_msg, bot_start_time, bot_process
-
+def get_bot_status():
+    global bot_process, bot_running, bot_status, bot_status_message, bot_start_time
     if bot_running and bot_process is not None:
         poll = bot_process.poll()
         if poll is not None:
-            add_log(f"Bot crashed with code {poll}", "ERROR")
+            add_log(f"Bot process died unexpectedly (exit code {poll})", "ERROR")
             bot_running = False
             bot_status = "Stopped"
-            bot_status_msg = f"Crashed ({poll})"
+            bot_status_message = f"Crashed with code {poll}"
             bot_process = None
             bot_start_time = None
-            pid_path = os.path.join(FILES_DIR, PID_FILE)
-            if os.path.exists(pid_path):
-                os.remove(pid_path)
-
+            if os.path.exists(PID_FILE):
+                os.remove(PID_FILE)
     uptime = None
     if bot_start_time and bot_running:
         diff = datetime.now() - bot_start_time
-        secs = int(diff.total_seconds())
-        h = secs // 3600
-        m = (secs % 3600) // 60
-        s = secs % 60
-        uptime = f"{h}h {m}m {s}s"
-
+        seconds = int(diff.total_seconds())
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        uptime = f"{hours}h {minutes}m {secs}s"
     return {
         "running": bot_running,
         "status": bot_status,
-        "message": bot_status_msg,
+        "message": bot_status_message,
         "uptime": uptime,
         "pid": bot_process.pid if bot_process else None,
-        "main_file": get_main_file()
+        "main_file": get_setting("main_file") or "bot.py"
     }
+
+def get_recent_logs(limit=200):
+    logs = []
+    temp_logs = []
+    while not bot_logs.empty():
+        try:
+            temp_logs.append(bot_logs.get_nowait())
+        except queue.Empty:
+            break
+    for log in temp_logs:
+        try:
+            bot_logs.put_nowait(log)
+        except queue.Full:
+            break
+    return temp_logs[-limit:]
 
 # ============================================================
 #  FILE OPERATIONS
 # ============================================================
 def list_files():
     files = []
-    for f in os.listdir(FILES_DIR):
-        if f.startswith(".") or f in [PID_FILE, LOG_FILE, REQUIREMENTS_HASH_FILE, VENV_DIR, SETTINGS_FILE]:
-            continue
-        path = os.path.join(FILES_DIR, f)
-        if os.path.isfile(path):
-            files.append({
-                "name": f,
-                "size": os.path.getsize(path),
-                "mtime": datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
-            })
+    try:
+        for entry in os.listdir(BOT_FILES_DIR):
+            if entry.startswith("."):
+                continue
+            path = os.path.join(BOT_FILES_DIR, entry)
+            if os.path.isfile(path):
+                size = os.path.getsize(path)
+                mtime = os.path.getmtime(path)
+                files.append({
+                    "name": entry,
+                    "size": size,
+                    "size_display": format_size(size),
+                    "mtime": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "is_python": entry.endswith(".py"),
+                    "is_text": is_text_file(entry)
+                })
+    except:
+        pass
     return sorted(files, key=lambda x: x["name"])
+
+def format_size(size):
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024.0:
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} TB"
+
+def is_text_file(filename):
+    text_extensions = ['.py', '.txt', '.json', '.yml', '.yaml', '.xml', '.html', '.css', '.js', '.md', '.cfg', '.conf', '.ini', '.sh', '.bash']
+    return os.path.splitext(filename)[1].lower() in text_extensions
+
+def read_file_content(filename):
+    filepath = os.path.join(BOT_FILES_DIR, filename)
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return f.read()
+    except:
+        return None
+
+def write_file_content(filename, content):
+    filepath = os.path.join(BOT_FILES_DIR, filename)
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+        return True
+    except:
+        return False
+
+def delete_file(filename):
+    filepath = os.path.join(BOT_FILES_DIR, filename)
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            return True
+        return False
+    except:
+        return False
+
+def rename_file(old_name, new_name):
+    old_path = os.path.join(BOT_FILES_DIR, old_name)
+    new_path = os.path.join(BOT_FILES_DIR, new_name)
+    try:
+        if os.path.exists(old_path) and not os.path.exists(new_path):
+            os.rename(old_path, new_path)
+            return True
+        return False
+    except:
+        return False
 
 # ============================================================
 #  ROUTES
@@ -354,13 +396,19 @@ def list_files():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u = request.form.get("username")
-        p = request.form.get("password")
-        if u == ADMIN_USERNAME and p == ADMIN_PASSWORD:
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT password FROM users WHERE username = ?", (username,))
+        row = c.fetchone()
+        conn.close()
+        if row and row[0] == password:
             session["logged_in"] = True
+            session["username"] = username
             return redirect(url_for("dashboard"))
         else:
-            return render_template_string(LOGIN_PAGE, error="Invalid credentials")
+            return render_template_string(LOGIN_PAGE, error="Invalid username or password")
     return render_template_string(LOGIN_PAGE, error=None)
 
 @app.route("/logout")
@@ -372,44 +420,126 @@ def logout():
 def dashboard():
     if not session.get("logged_in"):
         return redirect(url_for("login"))
-    status = get_status()
-    logs = get_logs(200)
-    return render_template_string(DASHBOARD_PAGE, status=status, logs=logs)
+    status = get_bot_status()
+    settings = {"main_file": get_setting("main_file") or "bot.py"}
+    logs = get_recent_logs(200)
+    return render_template_string(DASHBOARD_PAGE, status=status, settings=settings, logs=logs, active_page="dashboard")
 
-# API endpoints
+@app.route("/files")
+def files_page():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    files = list_files()
+    return render_template_string(FILES_PAGE, files=files, error=None, active_page="files")
+
+@app.route("/upload", methods=["POST"])
+def upload_files():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    uploaded = request.files.getlist("files")
+    for f in uploaded:
+        if f and f.filename:
+            filename = secure_filename(f.filename)
+            if filename:
+                filepath = os.path.join(BOT_FILES_DIR, filename)
+                f.save(filepath)
+    py_files = [f for f in os.listdir(BOT_FILES_DIR) if f.endswith(".py") and os.path.isfile(os.path.join(BOT_FILES_DIR, f))]
+    if len(py_files) == 1:
+        set_setting("main_file", py_files[0])
+        add_log(f"Auto-set main file to {py_files[0]} after upload", "INFO")
+    return redirect(url_for("files_page"))
+
+@app.route("/files/edit/<path:filename>", methods=["GET", "POST"])
+def edit_file(filename):
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    if ".." in filename or filename.startswith("/"):
+        return "Invalid file path", 400
+    if request.method == "POST":
+        content = request.form.get("content", "")
+        if write_file_content(filename, content):
+            return redirect(url_for("files_page"))
+        else:
+            return render_template_string(FILES_PAGE, files=list_files(), error=f"Failed to save {filename}")
+    content = read_file_content(filename)
+    if content is None:
+        return render_template_string(FILES_PAGE, files=list_files(), error=f"Cannot read {filename} (binary or inaccessible)")
+    return render_template_string(EDIT_FILE_PAGE, filename=filename, content=content, active_page="files")
+
+@app.route("/files/delete/<path:filename>", methods=["POST"])
+def delete_file_route(filename):
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+    if ".." in filename or filename.startswith("/"):
+        return jsonify({"error": "Invalid path"}), 400
+    success = delete_file(filename)
+    return jsonify({"success": success})
+
+@app.route("/files/rename", methods=["POST"])
+def rename_file_route():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+    old_name = request.form.get("old_name", "").strip()
+    new_name = request.form.get("new_name", "").strip()
+    if not old_name or not new_name:
+        return jsonify({"error": "Missing names"}), 400
+    if ".." in old_name or ".." in new_name:
+        return jsonify({"error": "Invalid path"}), 400
+    success = rename_file(old_name, new_name)
+    return jsonify({"success": success})
+
+@app.route("/settings", methods=["GET", "POST"])
+def settings_page():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        main_file = request.form.get("main_file", "").strip()
+        if main_file:
+            set_setting("main_file", main_file)
+        return redirect(url_for("settings_page"))
+    settings = {"main_file": get_setting("main_file") or "bot.py"}
+    files = list_files()
+    return render_template_string(SETTINGS_PAGE, settings=settings, files=files, active_page="settings")
+
+# ---------- API ----------
 @app.route("/api/status")
 def api_status():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify(get_status())
+    return jsonify(get_bot_status())
 
 @app.route("/api/logs")
 def api_logs():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
     limit = request.args.get("limit", 200, type=int)
-    return jsonify({"logs": get_logs(limit)})
+    logs = get_recent_logs(limit)
+    return jsonify({"logs": logs})
 
 @app.route("/api/start", methods=["POST"])
 def api_start():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
+    if bot_running:
+        return jsonify({"success": False, "message": "Bot is already running"})
     success = start_bot()
-    return jsonify({"success": success, "message": bot_status_msg})
+    return jsonify({"success": success, "message": bot_status_message})
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
+    if not bot_running:
+        return jsonify({"success": False, "message": "Bot is not running"})
     success = stop_bot()
-    return jsonify({"success": success, "message": bot_status_msg})
+    return jsonify({"success": success, "message": bot_status_message})
 
 @app.route("/api/restart", methods=["POST"])
 def api_restart():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
     success = restart_bot()
-    return jsonify({"success": success, "message": bot_status_msg})
+    return jsonify({"success": success, "message": bot_status_message})
 
 @app.route("/api/clear_logs", methods=["POST"])
 def api_clear_logs():
@@ -418,570 +548,693 @@ def api_clear_logs():
     clear_logs()
     return jsonify({"success": True})
 
-# File manager
-@app.route("/files")
-def files_page():
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-    files = list_files()
-    return render_template_string(FILES_PAGE, files=files)
-
-@app.route("/files/edit/<filename>", methods=["GET", "POST"])
-def edit_file(filename):
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-    if ".." in filename or "/" in filename:
-        return "Invalid path", 400
-    path = os.path.join(FILES_DIR, filename)
-    if request.method == "POST":
-        content = request.form.get("content", "")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        # If requirements.txt was edited, trigger reinstall on next start
-        if filename == "requirements.txt":
-            # Delete stored hash so venv rebuilds on next start
-            hash_path = os.path.join(FILES_DIR, REQUIREMENTS_HASH_FILE)
-            if os.path.exists(hash_path):
-                os.remove(hash_path)
-            add_log("requirements.txt updated, venv will rebuild on next start", "INFO")
-        return redirect(url_for("files_page"))
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except:
-        content = "Cannot read file"
-    return render_template_string(EDIT_PAGE, filename=filename, content=content)
-
-@app.route("/files/delete/<filename>", methods=["POST"])
-def delete_file(filename):
-    if not session.get("logged_in"):
-        return jsonify({"error": "Unauthorized"}), 401
-    if ".." in filename or "/" in filename:
-        return jsonify({"error": "Invalid"}), 400
-    path = os.path.join(FILES_DIR, filename)
-    if os.path.exists(path):
-        os.remove(path)
-    # If requirements.txt was deleted, remove hash so venv gets cleaned
-    if filename == "requirements.txt":
-        hash_path = os.path.join(FILES_DIR, REQUIREMENTS_HASH_FILE)
-        if os.path.exists(hash_path):
-            os.remove(hash_path)
-        # Delete venv too
-        venv_path = os.path.join(FILES_DIR, VENV_DIR)
-        if os.path.exists(venv_path):
-            shutil.rmtree(venv_path, ignore_errors=True)
-        add_log("requirements.txt deleted, venv removed", "INFO")
-    return jsonify({"success": True})
-
-@app.route("/files/upload", methods=["POST"])
-def upload_file():
-    if not session.get("logged_in"):
-        return jsonify({"error": "Unauthorized"}), 401
-    if "file" not in request.files:
-        return jsonify({"error": "No file"}), 400
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Empty"}), 400
-    filename = file.filename
-    # Sanitize
-    if ".." in filename or "/" in filename:
-        return jsonify({"error": "Invalid filename"}), 400
-    file.save(os.path.join(FILES_DIR, filename))
-    # If requirements.txt uploaded, trigger rebuild on next start
-    if filename == "requirements.txt":
-        hash_path = os.path.join(FILES_DIR, REQUIREMENTS_HASH_FILE)
-        if os.path.exists(hash_path):
-            os.remove(hash_path)
-        add_log("requirements.txt uploaded, venv will rebuild on next start", "INFO")
-    return jsonify({"success": True, "filename": filename})
-
-# Settings page
-@app.route("/settings", methods=["GET", "POST"])
-def settings_page():
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-    if request.method == "POST":
-        main_file = request.form.get("main_file", "").strip()
-        if main_file:
-            set_main_file(main_file)
-        return redirect(url_for("settings_page"))
-    settings = load_settings()
-    return render_template_string(SETTINGS_PAGE, settings=settings)
-
 # ============================================================
-#  HTML TEMPLATES
+#  HTML TEMPLATES - Mobile First
 # ============================================================
 
 LOGIN_PAGE = '''
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Login</title>
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Login — Bot Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.box{background:#16161f;padding:40px;border-radius:20px;border:1px solid #2a2a3a;width:100%;max-width:400px}
-h1{color:#fff;text-align:center;margin-bottom:8px}
-.sub{color:#888;text-align:center;margin-bottom:30px}
-.sub span{color:#7c5cfc}
-input{width:100%;padding:12px;background:#0f0f18;border:1px solid #2a2a3a;border-radius:12px;color:#fff;font-size:15px;outline:none;margin-bottom:18px}
-input:focus{border-color:#7c5cfc}
-button{width:100%;padding:14px;background:linear-gradient(135deg,#7c5cfc,#5c3cfc);border:none;border-radius:12px;color:#fff;font-size:16px;font-weight:600;cursor:pointer}
-button:hover{box-shadow:0 8px 30px rgba(124,92,252,0.3)}
-.error{background:#ff6b6b22;border:1px solid #ff6b6b44;color:#ff6b6b;padding:10px;border-radius:8px;text-align:center;margin-bottom:16px}
-.footer{color:#555;text-align:center;font-size:12px;margin-top:20px}
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#070a16;
+  --panel:rgba(20,26,52,0.7);
+  --border:rgba(120,140,220,0.15);
+  --text:#e8ecff;
+  --muted:#8892bf;
+  --primary:#6366f1;
+  --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
+.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:16px;padding:32px 24px;box-shadow:0 10px 40px rgba(0,0,0,0.25);max-width:400px;width:100%}
+h2{text-align:center;font-size:24px;margin-bottom:6px}
+.subtitle{text-align:center;color:var(--muted);font-size:14px;margin-bottom:24px}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:10px;border:0;cursor:pointer;font-weight:600;font-size:14px;font-family:inherit;width:100%;transition:transform .15s,box-shadow .15s}
+.btn-primary{background:var(--grad);color:#fff;box-shadow:0 8px 24px rgba(99,102,241,0.35)}
+.btn:hover{transform:translateY(-1px)}
+input{padding:11px 13px;border-radius:10px;border:1px solid var(--border);background:rgba(10,14,32,0.7);color:var(--text);font-size:14px;font-family:inherit;width:100%;transition:border-color .15s}
+input:focus{outline:0;border-color:var(--primary)}
+label{display:block;margin-bottom:5px;color:#c8c8e0;font-size:13px;font-weight:500}
+.form-group{margin-bottom:16px}
+.error{background:rgba(255,60,60,0.15);border:1px solid rgba(255,60,60,0.3);color:#ff6b6b;padding:12px;border-radius:10px;margin-bottom:16px;text-align:center;font-size:14px}
+.hint{text-align:center;color:#555577;font-size:12px;margin-top:16px}
 </style>
-</head>
-<body>
-<div class="box">
-<h1>🔐 Bot Panel</h1>
-<p class="sub">Manage your bot with <span>VPS Control</span></p>
-{% if error %}<div class="error">{{ error }}</div>{% endif %}
-<form method="POST">
-<input type="text" name="username" placeholder="Username" required>
-<input type="password" name="password" placeholder="Password" required>
-<button type="submit">Login</button>
-</form>
-<p class="footer">Default: admin / admin123</p>
+</head><body>
+<div class="card">
+  <h2>🔐 Login</h2>
+  <p class="subtitle">Manage your bot with <span style="color:var(--primary)">VPS Control</span></p>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <div class="form-group">
+      <label>Username</label>
+      <input type="text" name="username" required autofocus>
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" name="password" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Login</button>
+  </form>
+  <p class="hint">Default: admin / admin123</p>
 </div>
-</body>
-</html>
+</body></html>
 '''
 
 DASHBOARD_PAGE = '''
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Dashboard</title>
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Dashboard — Bot Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0f0;font-family:sans-serif;padding:20px}
-.container{max-width:1100px;margin:auto}
-.header{display:flex;justify-content:space-between;align-items:center;padding:16px 0 20px;border-bottom:1px solid #1a1a2a;flex-wrap:wrap;gap:12px}
-.header h1{font-size:24px;background:linear-gradient(135deg,#7c5cfc,#a88cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.header a{color:#ff6b6b;text-decoration:none;padding:6px 14px;border:1px solid #ff6b6b33;border-radius:8px}
-.nav{display:flex;gap:4px;margin:20px 0 24px;background:#12121c;padding:6px;border-radius:14px;flex-wrap:nowrap;overflow-x:auto}
-.nav a{color:#888;text-decoration:none;padding:10px 22px;border-radius:10px;font-size:14px;white-space:nowrap}
-.nav a.active{background:#7c5cfc;color:#fff}
-.nav a:hover:not(.active){background:#1a1a2a;color:#fff}
-.status-card{background:#12121c;border:1px solid #1a1a2a;border-radius:16px;padding:24px 28px;margin-bottom:24px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px}
-.status-dot{width:14px;height:14px;border-radius:50%;display:inline-block;flex-shrink:0}
-.status-dot.running{background:#4ade80;box-shadow:0 0 20px #4ade8044}
-.status-dot.stopped{background:#f87171;box-shadow:0 0 20px #f8717144}
-.status-dot.starting{background:#fbbf24}
-.status-dot.error{background:#f87171}
-.status-text{font-size:18px;font-weight:600}
-.status-text .sub{font-size:14px;font-weight:400;color:#888}
-.controls{display:flex;gap:10px;flex-wrap:wrap}
-.controls button{padding:10px 24px;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;color:#fff}
-.controls button:active{transform:scale(0.96)}
-.btn-start{background:#4ade80;color:#0a0a0f}
-.btn-start:hover{box-shadow:0 4px 24px #4ade8055}
-.btn-stop{background:#f87171;color:#0a0a0f}
-.btn-stop:hover{box-shadow:0 4px 24px #f8717155}
-.btn-restart{background:#7c5cfc}
-.btn-restart:hover{box-shadow:0 4px 24px #7c5cfc55}
-.controls button:disabled{opacity:0.4;cursor:not-allowed;pointer-events:none}
-.console-section{background:#0f0f18;border:1px solid #1a1a2a;border-radius:16px;overflow:hidden;margin-bottom:24px}
-.console-header{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#12121c;border-bottom:1px solid #1a1a2a;flex-wrap:wrap;gap:8px}
-.console-header h3{font-size:15px;font-weight:600;color:#c8c8e0}
-.console-header .actions{display:flex;gap:6px}
-.console-header .actions button{background:none;border:none;color:#555;cursor:pointer;font-size:13px;padding:4px 12px;border-radius:6px;transition:0.2s}
-.console-header .actions button:hover{background:#1a1a2a;color:#fff}
-.console-header .actions .copy-btn{color:#7c5cfc}
-.console-header .actions .copy-btn:hover{background:#7c5cfc22;color:#7c5cfc}
-.console-body{padding:16px 20px;height:500px;overflow-y:auto;font-family:monospace;font-size:13px;line-height:1.7;background:#08080e;color:#b0b0d0}
-.console-body::-webkit-scrollbar{width:6px}
-.console-body::-webkit-scrollbar-track{background:#0a0a12}
-.console-body::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:4px}
-.console-body .log-line{white-space:pre-wrap;word-break:break-all;border-bottom:1px solid #0f0f1a;padding:2px 0}
-.console-body .log-line .time{color:#555;margin-right:10px}
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#070a16;
+  --bg2:#0d1228;
+  --panel:rgba(20,26,52,0.7);
+  --panel-solid:#141a34;
+  --border:rgba(120,140,220,0.15);
+  --text:#e8ecff;
+  --muted:#8892bf;
+  --primary:#6366f1;
+  --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+  --ok:#10b981;
+  --danger:#ef4444;
+  --warn:#f59e0b;
+}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:#a5b4fc;text-decoration:none}
+a:hover{color:#c7d2fe}
+
+/* Top Bar */
+.topbar{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:12px 16px;
+  background:rgba(7,10,22,0.9);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;
+}
+.brand{font-weight:800;font-size:16px;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
+.brand .logo{width:28px;height:28px;border-radius:8px;background:var(--grad);display:grid;place-items:center;font-size:14px}
+.gradient-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.btn{display:inline-flex;align-items:center;gap:4px;padding:6px 12px;border-radius:8px;border:0;cursor:pointer;font-weight:600;font-size:12px;font-family:inherit;transition:transform .15s}
+.btn:hover{transform:scale(1.02)}
+.btn-ghost{background:rgba(255,255,255,0.06);color:#e8ecff;border:1px solid var(--border)}
+.btn-primary{background:var(--grad);color:#fff;box-shadow:0 4px 16px rgba(99,102,241,0.3)}
+.btn-ok{background:linear-gradient(135deg,#10b981,#059669);color:#fff}
+.btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
+.btn-sm{padding:6px 12px;font-size:12px}
+
+/* Navigation */
+.nav{
+  display:flex;gap:4px;
+  padding:10px 16px;
+  background:rgba(7,10,22,0.5);
+  border-bottom:1px solid var(--border);
+  flex-wrap:wrap;
+}
+.nav a{
+  color:#8892bf;font-size:13px;font-weight:500;
+  padding:6px 14px;border-radius:8px;transition:0.2s;
+  flex:1;text-align:center;min-width:60px;
+}
+.nav a:hover{background:rgba(255,255,255,0.05)}
+.nav a.active{
+  background:var(--panel-solid);
+  border:1px solid var(--border);
+  color:var(--text);
+}
+
+/* Content */
+.wrap{padding:12px 16px;max-width:800px;margin:0 auto}
+.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,0.25)}
+.card+.card{margin-top:12px}
+h3{font-size:16px;font-weight:600;margin-bottom:10px}
+.muted{color:var(--muted);font-size:12px}
+
+/* Status */
+.status-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.status-dot{width:12px;height:12px;border-radius:50%;display:inline-block;flex-shrink:0}
+.status-dot.running{background:#4ade80;box-shadow:0 0 16px #4ade8044}
+.status-dot.stopped{background:#f87171;box-shadow:0 0 16px #f8717144}
+.status-dot.starting{background:#fbbf24;box-shadow:0 0 16px #fbbf2444}
+.status-dot.error{background:#f87171;box-shadow:0 0 16px #f8717166}
+.status-dot.stopping{background:#fbbf24;box-shadow:0 0 16px #fbbf2444}
+.status-text{font-size:16px;font-weight:600}
+.status-text .sub{font-weight:400;color:var(--muted);font-size:13px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.controls button{flex:1;min-width:70px;justify-content:center;padding:8px 12px}
+
+/* Console */
+.console-body{
+  max-height:300px;overflow-y:auto;
+  background:#0a0a12;padding:6px 10px;border-radius:8px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.4;
+  color:#b0b0d0;border:1px solid var(--border);
+}
+.console-body .log-line{
+  white-space:pre-wrap;word-break:break-all;
+  padding:1px 0;border-bottom:1px solid rgba(255,255,255,0.02);
+}
+.console-body .log-line .time{color:#555577;margin-right:6px;font-size:10px}
 .console-body .log-line .level-INFO{color:#4ade80}
 .console-body .log-line .level-OUT{color:#b0b0d0}
 .console-body .log-line .level-ERR{color:#f87171}
 .console-body .log-line .level-WARN{color:#fbbf24}
 .console-body .log-line .level-ERROR{color:#ff4444}
-.console-empty{color:#444;text-align:center;padding:30px 0}
-.info-row{display:flex;flex-wrap:wrap;gap:20px 40px;padding:12px 20px;background:#12121c;border-radius:12px;border:1px solid #1a1a2a;font-size:14px;color:#888}
-.info-row strong{color:#e0e0f0}
-@media(max-width:700px){.status-card{flex-direction:column;align-items:stretch}.controls{justify-content:center}.console-body{height:350px}}
-@media(max-width:480px){.nav a{padding:8px 14px;font-size:12px}}
+.console-empty{color:#444466;text-align:center;padding:12px 0;font-size:12px}
+
+/* Utility */
+.flex{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.flex-between{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.gap-8{gap:8px}
+.mt-8{margin-top:8px}
+.mb-8{margin-bottom:8px}
+.text-center{text-align:center}
+.text-muted{color:var(--muted);font-size:12px}
+.footer{text-align:center;padding:20px;color:var(--muted);font-size:11px;border-top:1px solid var(--border);margin-top:20px}
 </style>
-</head>
-<body>
-<div class="container">
-<div class="header"><h1>⚡ Bot Panel</h1><a href="{{ url_for('logout') }}">Logout</a></div>
-<div class="nav"><a href="#" class="active">📊 Dashboard</a><a href="{{ url_for('files_page') }}">📁 Files</a><a href="{{ url_for('settings_page') }}">⚙️ Settings</a></div>
+</head><body>
 
-<div class="status-card">
-<div class="left">
-<span class="status-dot {{ status.status|lower }}" id="statusDot"></span>
-<div>
-<div class="status-text" id="statusText">{{ status.status }} <span class="sub">— <span id="statusMsg">{{ status.message }}</span></span></div>
-<div id="uptimeDisplay">{% if status.uptime %}⏱ Uptime: <strong>{{ status.uptime }}</strong>{% endif %}</div>
-</div>
-</div>
-<div class="controls">
-<button class="btn-start" id="btnStart" onclick="controlBot('start')">▶ Start</button>
-<button class="btn-stop" id="btnStop" onclick="controlBot('stop')">⏹ Stop</button>
-<button class="btn-restart" onclick="controlBot('restart')">🔄 Restart</button>
-</div>
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="brand">
+    <span class="logo">⚡</span>
+    <span>Ultra<span class="gradient-text">VPS</span></span>
+  </div>
+  <div>
+    {% if session.username %}
+      <span class="muted" style="margin-right:8px;font-size:12px">{{session.username}}</span>
+      <a href="/logout" class="btn btn-ghost btn-sm">Logout</a>
+    {% else %}
+      <a href="/login" class="btn btn-primary btn-sm">Login</a>
+    {% endif %}
+  </div>
 </div>
 
-<div class="info-row">
-<span>📄 Main File: <strong id="mainFileDisplay">{{ status.main_file }}</strong></span>
-<span>🆔 PID: <strong id="pidDisplay">{% if status.pid %}{{ status.pid }}{% else %}—{% endif %}</strong></span>
+<!-- NAVIGATION -->
+<div class="nav">
+  <a href="/" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+  <a href="/files" class="{% if active_page == 'files' %}active{% endif %}">Files</a>
+  <a href="/settings" class="{% if active_page == 'settings' %}active{% endif %}">Settings</a>
 </div>
 
-<div class="console-section">
-<div class="console-header">
-<h3>📟 Console</h3>
-<div class="actions">
-<button class="copy-btn" onclick="copyLogs()">📋 Copy Logs</button>
-<button onclick="clearConsole()">🗑️ Clear</button>
+<!-- CONTENT -->
+<div class="wrap">
+
+<div class="card">
+  <div class="status-row">
+    <span class="status-dot {{ status.status|lower }}"></span>
+    <div>
+      <div class="status-text">{{ status.status }} <span class="sub">— {{ status.message }}</span></div>
+      {% if status.uptime %}<div class="text-muted">⏱ Uptime: <strong>{{ status.uptime }}</strong></div>{% endif %}
+    </div>
+  </div>
+  <div class="controls">
+    <button class="btn btn-ok" onclick="controlBot('start')" {% if status.running %}disabled{% endif %}>▶ Start</button>
+    <button class="btn btn-danger" onclick="controlBot('stop')" {% if not status.running %}disabled{% endif %}>⏹ Stop</button>
+    <button class="btn btn-primary" onclick="controlBot('restart')">🔄 Restart</button>
+  </div>
+  <div class="text-muted mt-8">📄 Main: <strong>{{ status.main_file }}</strong> {% if status.pid %}· PID: <strong>{{ status.pid }}</strong>{% endif %}</div>
 </div>
+
+<div class="card">
+  <div class="flex-between">
+    <h3 style="margin:0;font-size:14px">📟 Console</h3>
+    <button class="btn btn-ghost btn-sm" onclick="clearConsole()">Clear</button>
+  </div>
+  <div class="console-body" id="console-body">
+    {% if logs %}
+      {% for log in logs %}
+      <div class="log-line">
+        {% set parts = log.split('] [') %}
+        {% if parts|length >= 2 %}
+          {% set time_part = parts[0].replace('[', '') %}
+          {% set level_part = parts[1].split('] ')[0] if ']' in parts[1] else 'INFO' %}
+          {% set msg = parts[1].split('] ')[1] if ']' in parts[1] else parts[1] %}
+          <span class="time">{{ time_part }}</span>
+          <span class="level-{{ level_part }}">[{{ level_part }}]</span>
+          <span>{{ msg }}</span>
+        {% else %}
+          <span>{{ log }}</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="console-empty">⏳ No logs — start your bot</div>
+    {% endif %}
+  </div>
 </div>
-<div class="console-body" id="console-body">
-{% if logs %}
-  {% for log in logs %}
-  <div class="log-line">{{ log }}</div>
-  {% endfor %}
-{% else %}
-<div class="console-empty">⏳ Console is empty — start your bot to see logs</div>
-{% endif %}
+
+<p class="text-center text-muted" style="margin-top:6px">💡 Requirements.txt auto‑installs on start</p>
 </div>
-</div>
-</div>
+
+<div class="footer">© ULTRA VPS </div>
 
 <script>
-let lastLogCount = 0;
-
-function fetchStatus() {
-    fetch('/api/status')
-        .then(r => r.json())
-        .then(data => {
-            document.getElementById('statusDot').className = 'status-dot ' + data.status.toLowerCase();
-            document.getElementById('statusText').innerHTML = data.status + ' <span class="sub">— <span id="statusMsg">' + data.message + '</span></span>';
-            const uptimeEl = document.getElementById('uptimeDisplay');
-            if (data.uptime) uptimeEl.innerHTML = '⏱ Uptime: <strong>' + data.uptime + '</strong>';
-            else uptimeEl.innerHTML = '';
-            document.getElementById('pidDisplay').textContent = data.pid || '—';
-            document.getElementById('mainFileDisplay').textContent = data.main_file || 'bot.py';
-            const btnStart = document.getElementById('btnStart');
-            const btnStop = document.getElementById('btnStop');
-            if (data.running) {
-                btnStart.disabled = true;
-                btnStop.disabled = false;
-            } else {
-                btnStart.disabled = false;
-                btnStop.disabled = true;
-            }
-        })
-        .catch(err => console.error('Status error:', err));
-}
-
-function fetchLogs() {
-    fetch('/api/logs?limit=200')
-        .then(r => r.json())
-        .then(data => {
-            const logs = data.logs || [];
-            if (logs.length !== lastLogCount) {
-                lastLogCount = logs.length;
-                const body = document.getElementById('console-body');
-                if (logs.length === 0) {
-                    body.innerHTML = '<div class="console-empty">⏳ Console is empty — start your bot to see logs</div>';
-                } else {
-                    let html = '';
-                    logs.forEach(log => {
-                        html += `<div class="log-line">${escapeHtml(log)}</div>`;
-                    });
-                    body.innerHTML = html;
-                }
-                body.scrollTop = body.scrollHeight;
-            }
-        })
-        .catch(err => console.error('Logs error:', err));
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 function controlBot(action) {
-    const btn = document.querySelector(`.btn-${action}`);
-    if (btn && btn.disabled) {
-        alert('Button is disabled');
-        return;
-    }
-    if (btn) btn.textContent = '⏳ ...';
-    fetch(`/api/${action}`, { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-            if (!data.success) alert('Action failed: ' + data.message);
-            setTimeout(fetchStatus, 1000);
-        })
-        .catch(err => alert('Network error: ' + err.message))
-        .finally(() => {
-            if (btn) btn.textContent = action === 'start' ? '▶ Start' : action === 'stop' ? '⏹ Stop' : '🔄 Restart';
-        });
+  const btn = document.querySelector(`.btn-${action === 'start' ? 'ok' : action === 'stop' ? 'danger' : 'primary'}`);
+  if (btn && btn.disabled) return;
+  fetch(`/api/${action}`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        setTimeout(() => location.reload(), 600);
+      } else {
+        alert('Failed: ' + data.message);
+      }
+    })
+    .catch(() => alert('Network error'));
 }
-
 function clearConsole() {
-    fetch('/api/clear_logs', { method: 'POST' })
-        .then(() => {
-            document.getElementById('console-body').innerHTML = '<div class="console-empty">⏳ Console cleared</div>';
-            lastLogCount = 0;
-        })
-        .catch(() => alert('Failed to clear logs'));
+  if (confirm('Clear all logs?')) {
+    fetch('/api/clear_logs', { method: 'POST' }).then(() => location.reload());
+  }
 }
-
-function copyLogs() {
-    const lines = document.querySelectorAll('.console-body .log-line');
-    if (!lines.length) { alert('No logs to copy'); return; }
-    let text = '';
-    lines.forEach(line => text += line.textContent + '\n');
-    navigator.clipboard.writeText(text).then(() => alert('✅ Logs copied!'))
-        .catch(() => {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            ta.remove();
-            alert('✅ Logs copied!');
-        });
+function scrollToBottom() {
+  const body = document.getElementById('console-body');
+  if (body) body.scrollTop = body.scrollHeight;
 }
-
-fetchStatus();
-fetchLogs();
-setInterval(() => { fetchStatus(); fetchLogs(); }, 3000);
+setInterval(() => {
+  fetch('/api/logs?limit=200')
+    .then(r => r.json())
+    .then(data => {
+      if (data.logs && data.logs.length > 0) {
+        const body = document.getElementById('console-body');
+        if (body) {
+          const current = body.querySelectorAll('.log-line').length;
+          if (data.logs.length !== current) {
+            location.reload();
+          } else {
+            scrollToBottom();
+          }
+        }
+      }
+    })
+    .catch(() => {});
+}, 3000);
+setTimeout(scrollToBottom, 200);
 </script>
-</body>
-</html>
+</body></html>
 '''
 
 FILES_PAGE = '''
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Files</title>
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Files — Bot Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0f0;font-family:sans-serif;padding:20px}
-.container{max-width:1100px;margin:auto}
-.header{display:flex;justify-content:space-between;align-items:center;padding:16px 0 20px;border-bottom:1px solid #1a1a2a;flex-wrap:wrap;gap:12px}
-.header h1{font-size:22px;background:linear-gradient(135deg,#7c5cfc,#a88cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.header .user{display:flex;gap:16px;align-items:center}
-.header .user a{color:#ff6b6b;text-decoration:none;padding:6px 14px;border:1px solid #ff6b6b33;border-radius:8px}
-.nav{display:flex;gap:4px;margin:20px 0 24px;background:#12121c;padding:6px;border-radius:14px;flex-wrap:nowrap;overflow-x:auto}
-.nav a{color:#888;text-decoration:none;padding:10px 22px;border-radius:10px;font-size:14px;white-space:nowrap}
-.nav a.active{background:#7c5cfc;color:#fff}
-.nav a:hover:not(.active){background:#1a1a2a;color:#fff}
-.upload-area{display:flex;gap:12px;background:#12121c;padding:12px 20px;border-radius:12px;border:1px solid #1a1a2a;margin-bottom:20px;flex-wrap:wrap;align-items:center}
-.upload-area input[type=file]{display:none}
-.upload-area label{background:#7c5cfc33;color:#7c5cfc;padding:6px 14px;border-radius:6px;cursor:pointer}
-.upload-area button{background:#7c5cfc;border:none;color:#fff;padding:6px 18px;border-radius:6px;cursor:pointer}
-.upload-status{color:#4ade80;font-size:13px;word-break:break-all}
-.file-list{background:#12121c;border:1px solid #1a1a2a;border-radius:16px;overflow:hidden}
-.file-item{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-bottom:1px solid #0f0f1a;flex-wrap:wrap;gap:8px}
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#070a16;
+  --bg2:#0d1228;
+  --panel:rgba(20,26,52,0.7);
+  --panel-solid:#141a34;
+  --border:rgba(120,140,220,0.15);
+  --text:#e8ecff;
+  --muted:#8892bf;
+  --primary:#6366f1;
+  --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+  --danger:#ef4444;
+}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:#a5b4fc;text-decoration:none}
+a:hover{color:#c7d2fe}
+.topbar{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:12px 16px;
+  background:rgba(7,10,22,0.9);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;
+}
+.brand{font-weight:800;font-size:16px;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
+.brand .logo{width:28px;height:28px;border-radius:8px;background:var(--grad);display:grid;place-items:center;font-size:14px}
+.gradient-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.btn{display:inline-flex;align-items:center;gap:4px;padding:6px 12px;border-radius:8px;border:0;cursor:pointer;font-weight:600;font-size:12px;font-family:inherit;transition:transform .15s}
+.btn:hover{transform:scale(1.02)}
+.btn-ghost{background:rgba(255,255,255,0.06);color:#e8ecff;border:1px solid var(--border)}
+.btn-primary{background:var(--grad);color:#fff;box-shadow:0 4px 16px rgba(99,102,241,0.3)}
+.btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
+.btn-sm{padding:6px 12px;font-size:12px}
+.nav{
+  display:flex;gap:4px;
+  padding:10px 16px;
+  background:rgba(7,10,22,0.5);
+  border-bottom:1px solid var(--border);
+  flex-wrap:wrap;
+}
+.nav a{
+  color:#8892bf;font-size:13px;font-weight:500;
+  padding:6px 14px;border-radius:8px;transition:0.2s;
+  flex:1;text-align:center;min-width:60px;
+}
+.nav a:hover{background:rgba(255,255,255,0.05)}
+.nav a.active{
+  background:var(--panel-solid);
+  border:1px solid var(--border);
+  color:var(--text);
+}
+.wrap{padding:12px 16px;max-width:800px;margin:0 auto}
+.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,0.25)}
+h2{font-size:18px;margin-bottom:12px}
+.muted{color:var(--muted);font-size:12px}
+.upload-area{border:2px dashed var(--border);border-radius:10px;padding:16px;text-align:center;margin-bottom:16px;transition:0.2s}
+.upload-area:hover{border-color:var(--primary)}
+.upload-area input[type="file"]{display:none}
+.file-item{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:6px}
 .file-item:last-child{border-bottom:none}
-.file-item .name{color:#c8c8e0;flex:1;min-width:120px;word-break:break-all}
-.file-item .name a{color:#c8c8e0;text-decoration:none}
-.file-item .name a:hover{color:#7c5cfc}
-.file-item .size{color:#555;font-size:13px;min-width:80px}
-.file-item .actions{display:flex;gap:6px;flex-wrap:wrap}
-.file-item .actions a,.file-item .actions button{padding:2px 12px;border-radius:4px;font-size:12px;border:none;cursor:pointer;background:#1a1a2a;color:#c8c8e0;text-decoration:none}
-.file-item .actions a:hover,.file-item .actions button:hover{background:#2a2a3a}
-.file-item .actions .del{color:#ff6b6b}
-.file-item .actions .del:hover{background:#ff6b6b22}
-.empty{text-align:center;padding:40px;color:#555}
-@media(max-width:480px){.nav a{padding:8px 14px;font-size:12px}}
+.file-item .left{display:flex;align-items:center;gap:10px;flex:1;min-width:120px}
+.file-item .actions{display:flex;gap:4px;flex-wrap:wrap}
+.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700;letter-spacing:.3px;text-transform:uppercase}
+.badge-py{background:#4ade8033;color:#4ade80}
+input{padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(10,14,32,0.7);color:var(--text);font-size:14px;font-family:inherit;width:100%}
+input:focus{outline:0;border-color:var(--primary)}
+.error{background:rgba(255,60,60,0.15);border:1px solid rgba(255,60,60,0.3);color:#ff6b6b;padding:10px;border-radius:8px;margin-bottom:12px;font-size:13px}
+.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.footer{text-align:center;padding:20px;color:var(--muted);font-size:11px;border-top:1px solid var(--border);margin-top:20px}
+.modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;padding:20px}
+.modal-content{background:#16161f;border:1px solid #2a2a3a;border-radius:16px;padding:24px;max-width:400px;width:100%}
+.modal h3{margin-bottom:12px}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
 </style>
-</head>
-<body>
-<div class="container">
-<div class="header"><h1>📁 File Manager</h1><div class="user"><span>{{ session.username }}</span><a href="{{ url_for('logout') }}">Logout</a></div></div>
-<div class="nav"><a href="{{ url_for('dashboard') }}">📊 Dashboard</a><a href="#" class="active">📁 Files</a><a href="{{ url_for('settings_page') }}">⚙️ Settings</a></div>
+</head><body>
+
+<div class="topbar">
+  <div class="brand"><span class="logo">⚡</span><span>Ultra<span class="gradient-text">VPS</span></span></div>
+  <div>
+    {% if session.username %}
+      <span class="muted" style="margin-right:8px;font-size:12px">{{session.username}}</span>
+      <a href="/logout" class="btn btn-ghost btn-sm">Logout</a>
+    {% else %}
+      <a href="/login" class="btn btn-primary btn-sm">Login</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="nav">
+  <a href="/" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+  <a href="/files" class="{% if active_page == 'files' %}active{% endif %}">Files</a>
+  <a href="/settings" class="{% if active_page == 'settings' %}active{% endif %}">Settings</a>
+</div>
+
+<div class="wrap">
+<h2>📁 Files</h2>
 
 <div class="upload-area">
-<span style="color:#888;">Upload files (multiple allowed):</span>
-<form id="uploadForm" method="POST" action="{{ url_for('upload_file') }}" enctype="multipart/form-data" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-<input type="file" id="fileInput" name="file" multiple>
-<label for="fileInput">Choose files</label>
-<button type="button" onclick="uploadFiles()">Upload</button>
-<span id="uploadStatus" class="upload-status"></span>
-</form>
+  <form action="/upload" method="POST" enctype="multipart/form-data" id="uploadForm">
+    <div class="flex" style="justify-content:center">
+      <label for="fileInput" style="background:var(--panel-solid);padding:8px 16px;border-radius:8px;cursor:pointer">📤 Choose</label>
+      <input type="file" id="fileInput" name="files" multiple onchange="updateFileCount()">
+      <span id="fileCount" style="color:var(--muted);font-size:13px">No file</span>
+      <button type="submit" class="btn btn-primary">⬆ Upload</button>
+    </div>
+  </form>
 </div>
 
-<div class="file-list">
-{% for f in files %}
-<div class="file-item">
-<span class="name"><a href="{{ url_for('edit_file', filename=f.name) }}">{{ f.name }}</a></span>
-<span class="size">{{ f.size }} bytes</span>
-<div class="actions">
-<a href="{{ url_for('edit_file', filename=f.name) }}">✏️ Edit</a>
-<button class="del" onclick="deleteFile('{{ f.name }}')">🗑️ Delete</button>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="card">
+  {% if files %}
+    {% for file in files %}
+    <div class="file-item">
+      <div class="left">
+        <span style="font-size:18px">{% if file.is_python %}🐍{% else %}📄{% endif %}</span>
+        <span style="font-weight:500;font-size:14px"><a href="/files/edit/{{ file.name }}">{{ file.name }}</a></span>
+        {% if file.is_python %}<span class="badge badge-py">Python</span>{% endif %}
+        <span class="muted">{{ file.size_display }}</span>
+      </div>
+      <div class="actions">
+        <a href="/files/edit/{{ file.name }}" class="btn btn-ghost btn-sm">✏️</a>
+        <button class="btn btn-ghost btn-sm" onclick="openRename('{{ file.name }}')">📝</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteFile('{{ file.name }}')">🗑️</button>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="text-center muted" style="padding:20px 0">📭 No files</div>
+  {% endif %}
 </div>
 </div>
-{% else %}
-<div class="empty">📭 No files found</div>
-{% endfor %}
-</div>
+
+<div class="footer">© ULTRA VPS </div>
+
+<div class="modal" id="renameModal" onclick="if(event.target===this)closeRename()">
+  <div class="modal-content">
+    <h3>📝 Rename</h3>
+    <input type="text" id="renameInput" placeholder="New filename">
+    <input type="hidden" id="renameOld">
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeRename()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmRename()">Rename</button>
+    </div>
+  </div>
 </div>
 
 <script>
-function deleteFile(name) {
-    if (!confirm('Delete "'+name+'"?')) return;
-    fetch('/files/delete/'+encodeURIComponent(name), { method: 'POST' })
-        .then(r => r.json())
-        .then(data => { if (data.success) location.reload(); else alert('Delete failed'); })
-        .catch(() => alert('Network error'));
-}
-
-async function uploadFiles() {
-    const input = document.getElementById('fileInput');
-    const status = document.getElementById('uploadStatus');
-    const files = input.files;
-    if (!files || files.length === 0) {
-        status.textContent = '⚠️ Please select at least one file.';
-        status.style.color = '#fbbf24';
-        return;
-    }
-    status.textContent = '⏳ Uploading...';
-    status.style.color = '#fbbf24';
-    let success = 0, fail = 0;
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const formData = new FormData();
-        formData.append('file', file);
-        try {
-            const resp = await fetch('/files/upload', { method: 'POST', body: formData });
-            const data = await resp.json();
-            if (data.success) success++; else fail++;
-        } catch (e) {
-            fail++;
-        }
-        status.textContent = `⏳ ${i+1}/${files.length} ... (${success} ok, ${fail} fail)`;
-    }
-    if (fail === 0) {
-        status.textContent = `✅ All ${files.length} files uploaded successfully!`;
-        status.style.color = '#4ade80';
-        setTimeout(() => location.reload(), 1200);
-    } else {
-        status.textContent = `⚠️ ${success} uploaded, ${fail} failed.`;
-        status.style.color = '#fbbf24';
-        setTimeout(() => location.reload(), 2000);
-    }
-}
+let renameTarget='';
+function openRename(f){renameTarget=f;document.getElementById('renameOld').value=f;document.getElementById('renameInput').value=f;document.getElementById('renameModal').style.display='flex';setTimeout(()=>document.getElementById('renameInput').focus(),100)}
+function closeRename(){document.getElementById('renameModal').style.display='none';renameTarget=''}
+function confirmRename(){const n=document.getElementById('renameInput').value.trim();const o=document.getElementById('renameOld').value;if(!n||n===o){closeRename();return}const fd=new FormData();fd.append('old_name',o);fd.append('new_name',n);fetch('/files/rename',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert('Failed')}).catch(()=>alert('Error'));closeRename()}
+function deleteFile(f){if(!confirm('Delete "'+f+'"?'))return;fetch('/files/delete/'+encodeURIComponent(f),{method:'POST'}).then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert('Failed')}).catch(()=>alert('Error'))}
+function updateFileCount(){const i=document.getElementById('fileInput');const c=i.files.length;document.getElementById('fileCount').textContent=c?c+' file'+(c>1?'s':'')+' selected':'No file'}
 </script>
-</body>
-</html>
+</body></html>
 '''
 
-EDIT_PAGE = '''
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+EDIT_FILE_PAGE = '''
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Edit {{ filename }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0f0;font-family:sans-serif;padding:20px;height:100vh;display:flex;flex-direction:column}
-.header{display:flex;justify-content:space-between;align-items:center;padding:10px 0 16px;border-bottom:1px solid #1a1a2a;flex-wrap:wrap;gap:10px}
-.header h3{font-size:18px;background:linear-gradient(135deg,#7c5cfc,#a88cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.actions{display:flex;gap:10px}
-.actions button,.actions a{padding:8px 20px;border-radius:8px;border:none;font-weight:600;cursor:pointer;text-decoration:none;font-size:14px}
-.btn-save{background:#4ade80;color:#0a0a0f}
-.btn-save:hover{box-shadow:0 4px 20px #4ade8044}
-.btn-cancel{background:#1a1a2a;color:#888}
-.btn-cancel:hover{background:#2a2a3a}
-.editor{flex:1;margin-top:12px}
-.editor textarea{width:100%;height:100%;background:#0f0f18;border:1px solid #1a1a2a;border-radius:12px;color:#e0e0f0;font-family:monospace;font-size:14px;padding:16px;resize:none;outline:none;min-height:400px}
-.editor textarea:focus{border-color:#7c5cfc}
-</style>
-</head>
-<body>
-<div class="header"><h3>✏️ {{ filename }}</h3><div class="actions"><a href="{{ url_for('files_page') }}" class="btn-cancel">Cancel</a><button class="btn-save" onclick="save()">💾 Save</button></div></div>
-<div class="editor"><textarea id="content">{{ content }}</textarea></div>
-<script>
-function save() {
-    const content = document.getElementById('content').value;
-    const form = document.createElement('form');
-    form.method = 'POST';
-    const input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = 'content';
-    input.value = content;
-    form.appendChild(input);
-    document.body.appendChild(form);
-    form.submit();
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#070a16;
+  --panel:rgba(20,26,52,0.7);
+  --border:rgba(120,140,220,0.15);
+  --text:#e8ecff;
+  --muted:#8892bf;
+  --primary:#6366f1;
+  --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
 }
-document.addEventListener('keydown', e => { if ((e.ctrlKey||e.metaKey)&&e.key==='s') { e.preventDefault(); save(); } });
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:#a5b4fc;text-decoration:none}
+.topbar{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:12px 16px;
+  background:rgba(7,10,22,0.9);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;
+}
+.brand{font-weight:800;font-size:16px;display:flex;align-items:center;gap:8px}
+.brand .logo{width:28px;height:28px;border-radius:8px;background:var(--grad);display:grid;place-items:center;font-size:14px}
+.gradient-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.btn{display:inline-flex;align-items:center;padding:6px 14px;border-radius:8px;border:0;cursor:pointer;font-weight:600;font-size:12px;font-family:inherit}
+.btn-primary{background:var(--grad);color:#fff;box-shadow:0 4px 16px rgba(99,102,241,0.3)}
+.btn-ghost{background:rgba(255,255,255,0.06);color:#e8ecff;border:1px solid var(--border)}
+.nav{
+  display:flex;gap:4px;padding:10px 16px;
+  background:rgba(7,10,22,0.5);border-bottom:1px solid var(--border);
+  flex-wrap:wrap;
+}
+.nav a{color:#8892bf;font-size:13px;font-weight:500;padding:6px 14px;border-radius:8px;flex:1;text-align:center;min-width:60px}
+.nav a:hover{background:rgba(255,255,255,0.05)}
+.nav a.active{background:var(--panel);border:1px solid var(--border);color:var(--text)}
+.wrap{padding:12px 16px;max-width:800px;margin:0 auto}
+.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,0.25)}
+textarea{width:100%;min-height:350px;padding:12px;border-radius:8px;border:1px solid var(--border);background:rgba(10,14,32,0.7);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;resize:vertical;outline:none}
+textarea:focus{outline:0;border-color:var(--primary)}
+code{background:rgba(99,102,241,0.12);color:#c7d2fe;padding:2px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px}
+.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.footer{text-align:center;padding:20px;color:var(--muted);font-size:11px;border-top:1px solid var(--border);margin-top:20px}
+</style>
+</head><body>
+
+<div class="topbar">
+  <div class="brand"><span class="logo">⚡</span><span>Ultra<span class="gradient-text">VPS</span></span></div>
+  <div>
+    {% if session.username %}
+      <span class="muted" style="margin-right:8px;font-size:12px;color:#8892bf">{{session.username}}</span>
+      <a href="/logout" class="btn btn-ghost">Logout</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="nav">
+  <a href="/" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+  <a href="/files" class="{% if active_page == 'files' %}active{% endif %}">Files</a>
+  <a href="/settings" class="{% if active_page == 'settings' %}active{% endif %}">Settings</a>
+</div>
+
+<div class="wrap">
+  <div class="flex" style="justify-content:space-between;margin-bottom:12px">
+    <h2 style="font-size:18px">✏️ <code>{{ filename }}</code></h2>
+    <div class="flex">
+      <a href="/files" class="btn btn-ghost">Cancel</a>
+      <button class="btn btn-primary" onclick="saveFile()">💾 Save</button>
+    </div>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <form method="POST" id="editForm">
+      <textarea name="content" id="editorContent" spellcheck="false">{{ content }}</textarea>
+    </form>
+  </div>
+</div>
+
+<div class="footer">© ULTRA VPS </div>
+
+<script>
+function saveFile(){const f=document.getElementById('editForm');const d=new FormData(f);fetch(window.location.href,{method:'POST',body:d}).then(r=>{if(r.ok)window.location.href='/files';else alert('Failed')}).catch(()=>alert('Error'))}
+document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveFile()}})
 </script>
-</body>
-</html>
+</body></html>
 '''
 
 SETTINGS_PAGE = '''
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Settings</title>
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Settings — Bot Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0f0;font-family:sans-serif;padding:20px}
-.container{max-width:800px;margin:auto}
-.header{display:flex;justify-content:space-between;align-items:center;padding:16px 0 20px;border-bottom:1px solid #1a1a2a;flex-wrap:wrap;gap:12px}
-.header h1{font-size:22px;background:linear-gradient(135deg,#7c5cfc,#a88cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.header .user{display:flex;gap:16px;align-items:center}
-.header .user a{color:#ff6b6b;text-decoration:none;padding:6px 14px;border:1px solid #ff6b6b33;border-radius:8px}
-.nav{display:flex;gap:4px;margin:20px 0 24px;background:#12121c;padding:6px;border-radius:14px;flex-wrap:nowrap;overflow-x:auto}
-.nav a{color:#888;text-decoration:none;padding:10px 22px;border-radius:10px;font-size:14px;white-space:nowrap}
-.nav a.active{background:#7c5cfc;color:#fff}
-.nav a:hover:not(.active){background:#1a1a2a;color:#fff}
-.card{background:#12121c;border:1px solid #1a1a2a;border-radius:16px;padding:24px;margin-top:20px}
-.card h3{font-size:18px;margin-bottom:6px}
-.card .desc{color:#555;font-size:13px;margin-bottom:18px}
-.form-group{margin-bottom:18px}
-.form-group label{display:block;color:#c8c8e0;font-size:13px;font-weight:500;margin-bottom:5px}
-.form-group input{width:100%;padding:11px 16px;background:#0f0f18;border:1px solid #2a2a3a;border-radius:10px;color:#fff;font-size:15px;outline:none}
-.form-group input:focus{border-color:#7c5cfc}
-.btn-save{padding:12px 32px;background:linear-gradient(135deg,#7c5cfc,#5c3cfc);border:none;border-radius:10px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;width:100%}
-.btn-save:hover{box-shadow:0 4px 24px #7c5cfc55}
-@media(max-width:480px){.nav a{padding:8px 14px;font-size:12px}}
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#070a16;
+  --panel:rgba(20,26,52,0.7);
+  --panel-solid:#141a34;
+  --border:rgba(120,140,220,0.15);
+  --text:#e8ecff;
+  --muted:#8892bf;
+  --primary:#6366f1;
+  --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);
+}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:#a5b4fc;text-decoration:none}
+.topbar{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:12px 16px;
+  background:rgba(7,10,22,0.9);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;
+}
+.brand{font-weight:800;font-size:16px;display:flex;align-items:center;gap:8px}
+.brand .logo{width:28px;height:28px;border-radius:8px;background:var(--grad);display:grid;place-items:center;font-size:14px}
+.gradient-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.btn{display:inline-flex;align-items:center;padding:6px 14px;border-radius:8px;border:0;cursor:pointer;font-weight:600;font-size:12px;font-family:inherit}
+.btn-primary{background:var(--grad);color:#fff;box-shadow:0 4px 16px rgba(99,102,241,0.3)}
+.btn-ghost{background:rgba(255,255,255,0.06);color:#e8ecff;border:1px solid var(--border)}
+.nav{
+  display:flex;gap:4px;padding:10px 16px;
+  background:rgba(7,10,22,0.5);border-bottom:1px solid var(--border);
+  flex-wrap:wrap;
+}
+.nav a{color:#8892bf;font-size:13px;font-weight:500;padding:6px 14px;border-radius:8px;flex:1;text-align:center;min-width:60px}
+.nav a:hover{background:rgba(255,255,255,0.05)}
+.nav a.active{background:var(--panel-solid);border:1px solid var(--border);color:var(--text)}
+.wrap{padding:12px 16px;max-width:800px;margin:0 auto}
+.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,0.25);max-width:500px}
+h2{font-size:18px;margin-bottom:12px}
+h3{font-size:15px;margin-bottom:6px}
+h4{color:var(--muted);font-size:13px;margin-bottom:6px}
+.muted{color:var(--muted);font-size:12px}
+input{padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(10,14,32,0.7);color:var(--text);font-size:14px;font-family:inherit;width:100%}
+input:focus{outline:0;border-color:var(--primary)}
+label{display:block;margin-bottom:4px;color:#c8c8e0;font-size:13px;font-weight:500}
+.form-group{margin-bottom:14px}
+.tag{display:inline-block;padding:4px 12px;margin:3px 4px 3px 0;background:var(--panel-solid);border:1px solid var(--border);border-radius:14px;font-size:12px}
+.tag .py{color:#4ade80;font-size:10px;margin-left:4px}
+.footer{text-align:center;padding:20px;color:var(--muted);font-size:11px;border-top:1px solid var(--border);margin-top:20px}
 </style>
-</head>
-<body>
-<div class="container">
-<div class="header"><h1>⚙️ Settings</h1><div class="user"><span>{{ session.username }}</span><a href="{{ url_for('logout') }}">Logout</a></div></div>
-<div class="nav"><a href="{{ url_for('dashboard') }}">📊 Dashboard</a><a href="{{ url_for('files_page') }}">📁 Files</a><a href="#" class="active">⚙️ Settings</a></div>
+</head><body>
 
+<div class="topbar">
+  <div class="brand"><span class="logo">⚡</span><span>Ultra<span class="gradient-text">VPS</span></span></div>
+  <div>
+    {% if session.username %}
+      <span class="muted" style="margin-right:8px;font-size:12px;color:#8892bf">{{session.username}}</span>
+      <a href="/logout" class="btn btn-ghost">Logout</a>
+    {% else %}
+      <a href="/login" class="btn btn-primary">Login</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="nav">
+  <a href="/" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+  <a href="/files" class="{% if active_page == 'files' %}active{% endif %}">Files</a>
+  <a href="/settings" class="{% if active_page == 'settings' %}active{% endif %}">Settings</a>
+</div>
+
+<div class="wrap">
+<h2>⚙️ Settings</h2>
 <div class="card">
-<h3>Bot Configuration</h3>
-<p class="desc">Set the main file name (e.g., main.py, bot.py). This file must exist in the 'files/' folder.</p>
-<form method="POST">
-<div class="form-group">
-<label>Main File</label>
-<input type="text" name="main_file" value="{{ settings.main_file }}" placeholder="bot.py">
+  <h3>📄 Bot Configuration</h3>
+  <p class="muted" style="margin-bottom:12px">Set the main Python file to run.</p>
+  <form method="POST">
+    <div class="form-group">
+      <label>Main File</label>
+      <input type="text" name="main_file" value="{{ settings.main_file }}" list="pyfiles">
+      <datalist id="pyfiles">
+        {% for f in files if f.is_python %}
+        <option value="{{ f.name }}">
+        {% endfor %}
+      </datalist>
+    </div>
+    <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">💾 Save</button>
+  </form>
+  <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
+    <h4>📂 Python Files</h4>
+    <div style="margin-top:6px">
+      {% for f in files if f.is_python %}
+      <span class="tag">{{ f.name }} <span class="py">🐍</span></span>
+      {% else %}
+      <span class="muted">No Python files found</span>
+      {% endfor %}
+    </div>
+  </div>
 </div>
-<button type="submit" class="btn-save">💾 Save Settings</button>
-</form>
 </div>
-</div>
-</body>
-</html>
+
+<div class="footer">© ULTA VPS </div>
+</body></html>
 '''
 
+# ============================================================
+#  MAIN
+# ============================================================
 if __name__ == "__main__":
-    # Cleanup old PID
-    pid_path = os.path.join(FILES_DIR, PID_FILE)
-    if os.path.exists(pid_path):
+    init_db()
+    if not get_setting("main_file"):
+        set_setting("main_file", "bot.py")
+    if not os.path.exists(BOT_FILES_DIR):
+        os.makedirs(BOT_FILES_DIR)
+    if os.path.exists(PID_FILE):
         try:
-            with open(pid_path, "r") as f:
-                pid = int(f.read())
+            with open(PID_FILE, "r") as f:
+                pid = int(f.read().strip())
             os.kill(pid, 0)
-            os.remove(pid_path)
         except:
-            os.remove(pid_path)
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+            os.remove(PID_FILE)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True, threaded=True)

@@ -589,7 +589,7 @@ label{display:block;margin-bottom:5px;color:#c8c8e0;font-size:13px;font-weight:5
 </head><body>
 <div class="card">
   <h2>🔐 Login</h2>
-  <p class="subtitle">Manage your bot with <span style="color:var(--primary)">VPS Control</span></p>
+  <p class="subtitle">Manage your VPS <span style="color:var(--primary)"> 🔑 </span></p>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="POST">
     <div class="form-group">
@@ -1189,7 +1189,7 @@ label{display:block;margin-bottom:4px;color:#c8c8e0;font-size:13px;font-weight:5
 <div class="wrap">
 <h2>⚙️ Settings</h2>
 <div class="card">
-  <h3>📄 Bot Configuration</h3>
+  <h3>📄 vps Configuration</h3>
   <p class="muted" style="margin-bottom:12px">Set the main Python file to run.</p>
   <form method="POST">
     <div class="form-group">
